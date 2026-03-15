@@ -3,11 +3,13 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, LineChart, Line, PieChart, Pie } from 'recharts';;
-import { Users, Calendar, FileText, Activity, TrendingUp, Clock, BarChart3, RefreshCw, CheckCircle2 } from 'lucide-react';;
+import { Users, Calendar, FileText, Activity, TrendingUp, Clock, BarChart3, RefreshCw, CheckCircle2, Edit3 } from 'lucide-react';;
 import { authService, type ActivityLog } from '@/lib/authService';
 import { dataService } from '@/lib/dataService';
+import EditProfileDialog from '@/components/EditProfileDialog';
+import { User as UserType } from '@/lib/authService';
 
-interface AbsensiStats {
+interface PresensiStats {
   totalToday: number;
   totalThisMonth: number;
   todayByActivity: Record<string, number>;
@@ -15,7 +17,7 @@ interface AbsensiStats {
   monthlyByActivity: Array<{ activity: string; count: number }>;
 }
 
-interface NotulensiStats {
+interface NotulaStats {
   totalAll: number;
   totalToday: number;
   totalThisMonth: number;
@@ -42,14 +44,14 @@ const getLast5MonthsData = () => {
 };
 
 export default function Dashboard() {
-  const [absensiStats, setAbsensiStats] = useState<AbsensiStats>({
+  const [absensiStats, setAbsensiStats] = useState<PresensiStats>({
     totalToday: 0,
     totalThisMonth: 0,
     todayByActivity: {},
     dailyByCategory: [],
     monthlyByActivity: []
   });
-  const [notulensiStats, setNotulensiStats] = useState<NotulensiStats>({
+  const [notulensiStats, setNotulensiStats] = useState<NotulaStats>({
     totalAll: 0,
     totalToday: 0,
     totalThisMonth: 0,
@@ -58,8 +60,9 @@ export default function Dashboard() {
   const [monthlyActivityData, setMonthlyActivityData] = useState<any[]>([]);
   const [todayAttendance, setTodayAttendance] = useState<any[]>([]);
   const [attendancePercentage, setAttendancePercentage] = useState(0);
-  const currentUser = authService.getCurrentUser();
+  const [currentUser, setCurrentUser] = useState<UserType | null>(authService.getCurrentUser());
   const [totalNonAdminUsers, setTotalNonAdminUsers] = useState(0);
+  const [isEditProfileOpen, setIsEditProfileOpen] = useState(false);
 
   useEffect(() => {
     loadDashboardData();
@@ -144,11 +147,12 @@ export default function Dashboard() {
     const last5Months = getLast5MonthsData();
     const allAbsensi = await dataService.getAbsensiList();
     
-    const activityTypes = ['senam', 'apel', 'rapat', 'doa-bersama', 'rapelan'];
+    const activityTypes = ['senam', 'apel', 'rapat', 'sharing-knowledge', 'doa-bersama', 'rapelan'];
     const activityLabels: Record<string, string> = {
       'senam': 'Senam',
       'apel': 'Apel',
       'rapat': 'Rapat',
+      'sharing-knowledge': 'Sharing Knowledge',
       'doa-bersama': 'Doa Bersama',
       'rapelan': 'Rapelan'
     };
@@ -163,8 +167,8 @@ export default function Dashboard() {
         const count = allAbsensi.filter(item => {
           if (item.isGuest) return false; // Exclude guests
           
-          // Parse item date (format: DD/MM/YYYY)
-          const [day, month, year] = item.tanggal.split('/').map(Number);
+          // Parse item date (format: YYYY-MM-DD)
+          const [year, month, day] = item.tanggal.split('-').map(Number);
           const itemDate = new Date(year, month - 1, day);
           
           return item.jenisKegiatan === activity &&
@@ -202,6 +206,7 @@ export default function Dashboard() {
     'Senam': '#2563eb',
     'Apel': '#10b981',
     'Rapat': '#f59e0b',
+    'Sharing Knowledge': '#06b6d4',
     'Doa Bersama': '#8b5cf6',
     'Rapelan': '#ef4444'
   };
@@ -225,6 +230,18 @@ export default function Dashboard() {
               <h1 className="text-4xl font-bold mb-2">
                 {getCurrentGreeting()}, {currentUser?.nama}!
               </h1>
+              {(currentUser as any)?.tim && (
+                <div className="flex items-center gap-2 mb-1 text-white/95 font-medium">
+                  <span className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
+                  Tim: {(currentUser as any).tim}
+                </div>
+              )}
+              {(currentUser as any)?.jabatan && (
+                <div className="flex items-center gap-2 mb-3 text-white/80 text-sm">
+                  <span>🏷️</span>
+                  {(currentUser as any).jabatan}
+                </div>
+              )}
               <p className="text-white/90 text-lg">
                 {new Date().toLocaleDateString('id-ID', { 
                   weekday: 'long', 
@@ -235,14 +252,24 @@ export default function Dashboard() {
               </p>
             </div>
             
-            <Button 
-              onClick={loadDashboardData} 
-              variant="secondary"
-              className="bg-white/20 border-0 text-white hover:bg-white/30 backdrop-blur-sm"
-            >
-              <RefreshCw className="w-4 h-4 mr-2" />
-              Refresh Data
-            </Button>
+            <div className="flex flex-col gap-2">
+              <Button 
+                onClick={loadDashboardData} 
+                variant="secondary"
+                className="bg-white/20 border-0 text-white hover:bg-white/30 backdrop-blur-sm"
+              >
+                <RefreshCw className="w-4 h-4 mr-2" />
+                Refresh Data
+              </Button>
+              <Button
+                onClick={() => setIsEditProfileOpen(true)}
+                variant="secondary"
+                className="bg-white/20 border-0 text-white hover:bg-white/30 backdrop-blur-sm"
+              >
+                <Edit3 className="w-4 h-4 mr-2" />
+                Edit Profil
+              </Button>
+            </div>
           </div>
         </div>
       </div>
@@ -261,7 +288,7 @@ export default function Dashboard() {
                 Hari Ini
               </Badge>
             </div>
-            <h3 className="text-sm font-medium text-gray-600 mb-1">Absensi Hari Ini</h3>
+            <h3 className="text-sm font-medium text-gray-600 mb-1">Presensi Hari Ini</h3>
             <p className="text-4xl font-bold text-gray-900 mb-2">{absensiStats.totalToday || 0}</p>
             <p className="text-xs text-gray-500">
               Pegawai & magang (tidak termasuk tamu)
@@ -311,10 +338,10 @@ export default function Dashboard() {
                 Notulensi
               </Badge>
             </div>
-            <h3 className="text-sm font-medium text-gray-600 mb-1">Notulensi Bulan Ini</h3>
+            <h3 className="text-sm font-medium text-gray-600 mb-1">Notula Bulan Ini</h3>
             <p className="text-4xl font-bold text-gray-900 mb-2">{notulensiStats.totalThisMonth || 0}</p>
             <p className="text-xs text-gray-500">
-              Notulensi bulan ini
+              Notula bulan ini
             </p>
             <div className="mt-4 flex items-center gap-2 text-purple-600">
               <FileText className="w-4 h-4" />
@@ -500,8 +527,8 @@ export default function Dashboard() {
                 <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mb-4">
                   <Activity className="w-8 h-8 text-gray-300" />
                 </div>
-                <p className="text-gray-500 font-medium">Belum ada data absensi bulanan</p>
-                <p className="text-sm text-gray-400 mt-1">Data akan muncul setelah ada absensi</p>
+                <p className="text-gray-500 font-medium">Belum ada data presensi bulanan</p>
+                <p className="text-sm text-gray-400 mt-1">Data akan muncul setelah ada presensi</p>
               </div>
             )}
           </CardContent>
@@ -628,6 +655,13 @@ export default function Dashboard() {
                         bgColor: 'bg-orange-50',
                         borderColor: 'border-orange-300'
                       },
+                      'sharing-knowledge': { 
+                        label: 'Sharing Knowledge', 
+                        color: 'text-cyan-700', 
+                        icon: '🧠',
+                        bgColor: 'bg-cyan-50',
+                        borderColor: 'border-cyan-300'
+                      },
                       'doa-bersama': { 
                         label: 'Doa Bersama', 
                         color: 'text-purple-700', 
@@ -702,6 +736,16 @@ export default function Dashboard() {
           </div>
         </CardContent>
       </Card>
+
+      {/* Edit Profile Dialog */}
+      {currentUser && (
+        <EditProfileDialog
+          open={isEditProfileOpen}
+          onOpenChange={setIsEditProfileOpen}
+          currentUser={currentUser}
+          onProfileUpdated={(updatedUser) => setCurrentUser(updatedUser)}
+        />
+      )}
     </div>
   );
 }

@@ -5,13 +5,16 @@ export interface AbsensiRecord {
   id: string;
   userId: string;
   namaUser: string;
-  jenisKegiatan: 'senam' | 'apel' | 'rapelan' | 'doa-bersama' | 'rapat';
+  jenisKegiatan: 'senam' | 'apel' | 'rapelan' | 'doa-bersama' | 'rapat' | 'sharing-knowledge';
   namaKegiatan: string;
+  idKegiatan?: string;
   tanggal: string;
   waktu: string;
   signature: string;
   status: 'hadir' | 'tidak-hadir';
+  statusKehadiran?: 'hadir' | 'terlambat';
   instansi?: string;
+  email?: string;
   isGuest?: boolean;
 }
 
@@ -20,7 +23,12 @@ export interface NotulensiRecord {
   userId: string;
   namaUser: string;
   judul: string;
-  jenisKegiatan: 'rapat' | 'doa' | 'rapelan' | 'lainnya';
+  jenisKegiatan: 'rapat' | 'doa' | 'rapelan' | 'sharing-knowledge' | 'lainnya';
+  idKegiatan?: string;
+  ringkasan?: string;
+  diskusi?: string;
+  kesimpulan?: string;
+  tanya_jawab?: string;
   isi: string;
   tanggal: string;
   waktu: string;
@@ -31,8 +39,8 @@ export interface NotulensiRecord {
   agenda?: string;
   signature?: string;
   pemandu?: string;
-  linkedAbsensiId?: string;  // ← TAMBAHKAN INI
-  isDraft?: boolean;          // ← TAMBAHKAN INI
+  linkedAbsensiId?: string;
+  isDraft?: boolean;
   daftarHadirOtomatis?: string;
 }
 
@@ -40,6 +48,7 @@ export interface UndanganRecord {
   id: string;
   userId: string;
   namaUser: string;
+  idKegiatan?: string;
   tempat: string;
   tanggal: string;
   nomorSurat: string;
@@ -64,16 +73,67 @@ export interface UndanganRecord {
 
 export interface QRAbsensiCode {
   id: string;
-  jenisKegiatan: 'senam' | 'apel' | 'rapelan' | 'doa-bersama' | 'rapat';
+  jenisKegiatan: 'senam' | 'apel' | 'rapelan' | 'doa-bersama' | 'rapat' | 'sharing-knowledge';
   namaKegiatan: string;
+  idKegiatan?: string;
   createdBy: string;
   createdByName: string;
   createdAt: string;
   expiresAt?: string;
   isActive: boolean;
+  pesertaMode?: 'publik' | 'akun';
+}
+
+export interface JadwalRapat {
+  id: string;
+  judul: string;
+  jenisKegiatan?: string;
+  deskripsi?: string;
+  tanggal: string;
+  jamMulai: string;
+  jamSelesai: string;
+  tim: string[];
+  peserta: string[];
+  pesertaMode?: 'publik' | 'akun'; // publik = include tamu, akun = Syntak user only
+  pesertaSpesifik?: string[]; // array of user ids, if empty = all in that kategori
+  repeatType: 'none' | 'daily' | 'weekly' | 'custom';
+  repeatDays?: number[];
+  repeatUntil?: string;
+  allowStack?: boolean;
+  openOffsetMinutes?: number;
+  closeOffsetMinutes?: number;
+  latenessThresholdMinutes?: number;
+  absen_state?: 'disabled' | 'open' | 'closed';
+  absen_tooltip?: string;
+  lateness_status?: 'on_time' | 'late' | 'not_attempted';
+  visibility?: boolean;
+  createdBy: string;
+  isActive: boolean;
+  createdAt?: string;
+  activeQRId?: string;
 }
 
 class DataService {
+  // ============================================
+  // USER PROFILE MANAGEMENT
+  // ============================================
+
+  async updateProfile(userId: string, data: { nama?: string; tim?: string; jabatan?: string }): Promise<{ success: boolean; message: string; user?: any }> {
+    try {
+      const result = await apiClient.put<{ success: boolean; message: string; user?: any }>(`/auth/profile/${userId}`, data);
+      // Update stored current user in localStorage
+      const currentUser = authService.getCurrentUser();
+      if (currentUser && currentUser.id === userId) {
+        const updatedUser = { ...currentUser, ...data };
+        localStorage.setItem('currentUser', JSON.stringify(updatedUser));
+      }
+      return result;
+    } catch (error: any) {
+      console.error('Update profile error:', error);
+      return { success: false, message: error.response?.data?.message || 'Gagal memperbarui profil' };
+    }
+  }
+
   // ============================================
   // ABSENSI MANAGEMENT
   // ============================================
@@ -81,36 +141,42 @@ class DataService {
   async saveAbsensi(
     jenisKegiatan: string,
     namaKegiatan: string,
-    signature: string
-  ): Promise<boolean> {
+    signature: string,
+    idKegiatan?: string
+  ): Promise<{ success: boolean; message: string }> {
     try {
       const currentUser = authService.getCurrentUser();
-      if (!currentUser) return false;
+      if (!currentUser) return { success: false, message: 'User not logged in' };
 
       // Validasi: Magang tidak bisa absen Rapelan
       if (currentUser.kategori === 'Magang' && jenisKegiatan === 'rapelan') {
-        return false;
+        return { success: false, message: 'Magang tidak diperbolehkan melakukan Rapelan.' };
       }
 
-      await apiClient.post('/absensi', {
+      const response = await apiClient.post<{ success: boolean; message: string }>('/absensi', {
         userId: currentUser.id,
         namaUser: currentUser.nama,
         jenisKegiatan,
         namaKegiatan,
-        signature
+        signature,
+        idKegiatan
       });
 
-      await this.autoCreateDraftNotulensi(
-        jenisKegiatan,
-        namaKegiatan,
-        currentUser.id,
-        currentUser.nama
-      );
+      // Auto-create draft notula if linked via id_kegiatan
+      if (idKegiatan) {
+        await this.autoCreateDraftNotulensi(
+          jenisKegiatan,
+          namaKegiatan,
+          currentUser.id,
+          currentUser.nama,
+          idKegiatan
+        );
+      }
 
-      return true;
-    } catch (error) {
+      return response;
+    } catch (error: any) {
       console.error('Save absensi error:', error);
-      return false;
+      return { success: false, message: error.response?.data?.message || 'Gagal menyimpan presensi' };
     }
   }
 
@@ -122,123 +188,75 @@ class DataService {
     jenisKegiatan: string,
     namaKegiatan: string,
     userId: string,
-    namaUser: string
+    namaUser: string,
+    idKegiatan?: string
   ): Promise<boolean> {
     try {
-      console.log('🔄 Attempting to create draft notulensi...', { jenisKegiatan, namaKegiatan });
-
       // Hanya untuk rapat dan doa-bersama
-      if (jenisKegiatan !== 'rapat' && jenisKegiatan !== 'doa-bersama') {
-        console.log('❌ Not rapat/doa-bersama, skipping...');
+      if (jenisKegiatan !== 'rapat' && jenisKegiatan !== 'doa-bersama' && jenisKegiatan !== 'sharing-knowledge') {
         return false;
       }
 
-      // Cek apakah draft sudah ada untuk kegiatan ini hari ini
-      const today = new Date().toLocaleDateString('id-ID');
-      const existingNotulensi = await this.getNotulensiToday();
-
-      // Cek berdasarkan judul yang mengandung [DRAFT]
-      const alreadyExists = existingNotulensi.some(n =>
-        n.judul.includes(`[DRAFT] ${namaKegiatan}`) &&
-        n.tanggal === today
-      );
-
-      if (alreadyExists) {
-        console.log('⚠️ Draft already exists for this activity today');
-        return false;
+      // Cek apakah draft sudah ada (bisa lewat id_kegiatan)
+      if (idKegiatan) {
+        const existing = await this.getNotulensiList();
+        if (existing.some(n => n.idKegiatan === idKegiatan)) {
+          return false;
+        }
       }
 
       // Konversi jenis kegiatan
-      const jenisNotulensi = jenisKegiatan === 'doa-bersama' ? 'doa' : 'rapat';
+      let jenisNotulensi = 'lainnya';
+      if (jenisKegiatan === 'doa-bersama') jenisNotulensi = 'doa';
+      else if (jenisKegiatan === 'rapat') jenisNotulensi = 'rapat';
+      else if (jenisKegiatan === 'sharing-knowledge') jenisNotulensi = 'sharing-knowledge';
 
-      console.log('✅ Creating draft notulensi...', { jenisNotulensi, namaKegiatan });
-
-      // Buat draft notulensi - HANYA kirim field yang didukung
+      // Buat draft notulensi
       await apiClient.post('/notulensi', {
         userId,
         namaUser,
-        judul: `[DRAFT] ${namaKegiatan}`,  // ← Tandai dengan prefix
+        judul: `Notula: ${namaKegiatan}`,
         jenisKegiatan: jenisNotulensi,
-        isi: `[DRAFT OTOMATIS - Belum Dilengkapi]\n\nNotulensi untuk kegiatan: ${namaKegiatan}\nTanggal: ${today}\n\n📝 PETUNJUK PENGISIAN:\n1. Klik tombol "Edit" untuk melengkapi notulensi ini\n2. Hapus tanda [DRAFT] di judul setelah selesai mengisi\n3. Isi kesimpulan rapat atau informasi doa bersama\n4. Klik "Muat Daftar Hadir Otomatis" untuk menambahkan daftar peserta\n\n--- Silakan lengkapi isi notulensi di bawah ini ---\n\n`
-        // TIDAK kirim field ini karena backend belum support:
-        // isDraft, linkedAbsensiId, daftarHadirOtomatis
+        idKegiatan,
+        isi: `[DRAFT OTOMATIS]\n\nKegiatan: ${namaKegiatan}\n\nSilakan isi rincian kegiatan di bawah ini.`
       });
 
-      console.log('✅ Draft notulensi created successfully!');
       return true;
     } catch (error) {
-      console.error('❌ Auto create draft notulensi error:', error);
+      console.error('Auto create draft notulensi error:', error);
       return false;
-    }
-  }
-
-  async getDaftarHadirByKegiatan(
-    jenisKegiatan: string,
-    namaKegiatan: string,
-    tanggal: string
-  ): Promise<string> {
-    try {
-      const absensiList = await this.getAbsensiList();
-      const users = await authService.getAllUsersForAdmin();
-
-      // Filter absensi sesuai kegiatan dan tanggal
-      const filtered = absensiList.filter(a =>
-        a.jenisKegiatan === jenisKegiatan &&
-        a.namaKegiatan === namaKegiatan &&
-        a.tanggal === tanggal
-      );
-
-      if (filtered.length === 0) {
-        return 'Belum ada peserta yang hadir.';
-      }
-
-      // Format daftar hadir
-      let daftarHadir = `DAFTAR HADIR ${namaKegiatan.toUpperCase()}\n`;
-      daftarHadir += `Tanggal: ${tanggal}\n`;
-      daftarHadir += `Total Peserta: ${filtered.length} orang\n\n`;
-      daftarHadir += `Daftar Peserta:\n`;
-
-      filtered.forEach((absen, index) => {
-        const user = users.find(u => u.id === absen.userId);
-        const kategori = absen.isGuest ? 'Tamu' : (user?.kategori || 'N/A');
-        const instansi = absen.isGuest && absen.instansi ? ` (${absen.instansi})` : '';
-
-        daftarHadir += `${index + 1}. ${absen.namaUser}${instansi} - ${kategori} - ${absen.waktu}\n`;
-      });
-
-      return daftarHadir;
-    } catch (error) {
-      console.error('Get daftar hadir error:', error);
-      return '';
     }
   }
 
   async saveGuestAbsensi(
     nama: string,
     instansi: string,
+    email: string,
     jenisKegiatan: string,
     namaKegiatan: string,
-    signature: string
-  ): Promise<boolean> {
+    signature: string,
+    idKegiatan?: string
+  ): Promise<{ success: boolean; message: string }> {
     try {
-      await apiClient.post('/absensi/guest', {
+      return await apiClient.post<{ success: boolean; message: string }>('/absensi/guest', {
         nama,
         instansi,
+        email,
         jenisKegiatan,
         namaKegiatan,
-        signature
+        signature,
+        idKegiatan
       });
-
-      return true;
-    } catch (error) {
+    } catch (error: any) {
       console.error('Save guest absensi error:', error);
-      return false;
+      return { success: false, message: error.response?.data?.message || 'Gagal menyimpan presensi tamu' };
     }
   }
 
-  async getAbsensiList(): Promise<AbsensiRecord[]> {
+  async getAbsensiList(userId?: string): Promise<AbsensiRecord[]> {
     try {
-      return await apiClient.get<AbsensiRecord[]>('/absensi');
+      const url = userId ? `/absensi?userId=${userId}` : '/absensi';
+      return await apiClient.get<AbsensiRecord[]>(url);
     } catch (error) {
       console.error('Get absensi list error:', error);
       return [];
@@ -255,56 +273,64 @@ class DataService {
   }
 
   async getAbsensiTodayNonGuest(): Promise<AbsensiRecord[]> {
-    const today = await this.getAbsensiToday();
-    return today.filter(a => !a.isGuest);
-  }
-
-  async getAbsensiThisMonth(): Promise<AbsensiRecord[]> {
     try {
-      return await apiClient.get<AbsensiRecord[]>('/absensi?month=true');
+      const records = await this.getAbsensiToday();
+      return records.filter(r => !r.isGuest);
     } catch (error) {
-      console.error('Get absensi this month error:', error);
+      console.error('Get absensi today non-guest error:', error);
       return [];
     }
   }
 
   async getAbsensiThisMonthNonGuest(): Promise<AbsensiRecord[]> {
-    const thisMonth = await this.getAbsensiThisMonth();
-    return thisMonth.filter(a => !a.isGuest);
-  }
-
-  async getAbsensiByUser(userId: string): Promise<AbsensiRecord[]> {
     try {
-      return await apiClient.get<AbsensiRecord[]>(`/absensi?userId=${userId}`);
+      const records = await apiClient.get<AbsensiRecord[]>('/absensi?month=true');
+      return records.filter(r => !r.isGuest);
     } catch (error) {
-      console.error('Get absensi by user error:', error);
+      console.error('Get absensi month non-guest error:', error);
       return [];
     }
   }
 
-  async deleteAbsensi(absensiId: string): Promise<boolean> {
+  async getAbsensiStats(): Promise<{ totalToday: number; totalThisMonth: number; todayByActivity: Record<string, number> }> {
     try {
-      await apiClient.delete(`/absensi/${absensiId}`);
-      return true;
+      const today = await this.getAbsensiTodayNonGuest();
+      const thisMonth = await this.getAbsensiThisMonthNonGuest();
+      
+      const todayByActivity = today.reduce((acc, curr) => {
+        acc[curr.jenisKegiatan] = (acc[curr.jenisKegiatan] || 0) + 1;
+        return acc;
+      }, {} as Record<string, number>);
+
+      return { totalToday: today.length, totalThisMonth: thisMonth.length, todayByActivity };
     } catch (error) {
-      console.error('Delete absensi error:', error);
-      return false;
+      console.error('Get absensi stats error:', error);
+      return { totalToday: 0, totalThisMonth: 0, todayByActivity: {} };
     }
   }
 
-  async deleteAllAbsensi(): Promise<boolean> {
+  async getNotulensiStats(): Promise<{ totalAll: number; totalToday: number; totalThisMonth: number; contributors: number }> {
     try {
-      await apiClient.delete('/absensi');
-      return true;
+      const all = await this.getNotulensiList();
+      const today = new Date().toISOString().split('T')[0];
+      const currentMonth = new Date().getMonth();
+      const currentYear = new Date().getFullYear();
+
+      const totalToday = all.filter(n => n.tanggal === today).length;
+      const totalThisMonth = all.filter(n => {
+        const [year, month] = n.tanggal.split('-').map(Number);
+        return month - 1 === currentMonth && year === currentYear;
+      }).length;
+      const contributors = new Set(all.map(n => n.userId)).size;
+
+      return { totalAll: all.length, totalToday, totalThisMonth, contributors };
     } catch (error) {
-      console.error('Delete all absensi error:', error);
-      return false;
+      console.error('Get notulensi stats error:', error);
+      return { totalAll: 0, totalToday: 0, totalThisMonth: 0, contributors: 0 };
     }
   }
 
-  async getDailyAbsensiByCategory(): Promise<
-    Array<{ date: string; Pegawai: number; Magang: number }>
-  > {
+  async getDailyAbsensiByCategory(): Promise<Array<{ date: string; Pegawai: number; Magang: number }>> {
     try {
       const absensiList = await this.getAbsensiThisMonthNonGuest();
       const users = await authService.getAllUsersForAdmin();
@@ -313,33 +339,25 @@ class DataService {
       absensiList.forEach(absensi => {
         const user = users.find(u => u.id === absensi.userId);
         const kategori = user?.kategori || 'Pegawai';
-
+        
         if (!dailyData[absensi.tanggal]) {
           dailyData[absensi.tanggal] = { Pegawai: 0, Magang: 0 };
         }
-
-        dailyData[absensi.tanggal][kategori]++;
+        
+        dailyData[absensi.tanggal][kategori as 'Pegawai' | 'Magang']++;
       });
 
-      return Object.entries(dailyData)
-        .map(([date, counts]) => ({
-          date: date.split('/').slice(0, 2).join('/'),
-          ...counts
-        }))
-        .sort((a, b) => {
-          const dateA = new Date(a.date.split('/').reverse().join('-'));
-          const dateB = new Date(b.date.split('/').reverse().join('-'));
-          return dateA.getTime() - dateB.getTime();
-        });
+      return Object.entries(dailyData).map(([date, counts]) => ({
+        date,
+        ...counts
+      })).sort((a, b) => a.date.localeCompare(b.date));
     } catch (error) {
       console.error('Get daily absensi by category error:', error);
       return [];
     }
   }
 
-  async getMonthlyAbsensiByActivity(): Promise<
-    Array<{ activity: string; count: number }>
-  > {
+  async getMonthlyAbsensiByActivity(): Promise<Array<{ activity: string; count: number }>> {
     try {
       const absensiList = await this.getAbsensiThisMonthNonGuest();
       const activityCounts: Record<string, number> = {};
@@ -359,29 +377,45 @@ class DataService {
     }
   }
 
+  async deleteAbsensi(absensiId: string): Promise<boolean> {
+    try {
+      await apiClient.delete(`/absensi/${absensiId}`);
+      return true;
+    } catch (error) {
+      console.error('Delete absensi error:', error);
+      return false;
+    }
+  }
+
   // ============================================
   // QR CODE MANAGEMENT
   // ============================================
 
   async generateAbsensiQR(
-    jenisKegiatan: 'senam' | 'apel' | 'rapelan' | 'doa-bersama' | 'rapat',
-    namaKegiatan: string
-  ): Promise<string> {
+    jenisKegiatan: string,
+    namaKegiatan: string,
+    expiresAt?: string,
+    idKegiatan?: string
+  ): Promise<{ success: boolean; id?: string; message?: string }> {
     try {
       const currentUser = authService.getCurrentUser();
-      if (!currentUser || currentUser.role !== 'admin') return '';
+      if (!currentUser || currentUser.role !== 'admin') {
+        return { success: false, message: 'Hanya admin yang dapat generate QR' };
+      }
 
-      const result = await apiClient.post<{ success: boolean; id: string }>('/qr/generate', {
+      const result = await apiClient.post<{ success: boolean; id: string; message?: string }>('/qr/generate', {
         jenisKegiatan,
         namaKegiatan,
+        expiresAt,
+        idKegiatan,
         createdBy: currentUser.id,
         createdByName: currentUser.nama
       });
 
-      return result.id || '';
-    } catch (error) {
+      return result;
+    } catch (error: any) {
       console.error('Generate QR error:', error);
-      return '';
+      return { success: false, message: error.response?.data?.message || 'Gagal generate QR' };
     }
   }
 
@@ -403,19 +437,6 @@ class DataService {
     }
   }
 
-  async getActiveQR(userId: string): Promise<QRAbsensiCode | null> {
-    try {
-      const response = await apiClient.get<{ success: boolean; active: QRAbsensiCode | null }>(`/qr/active?userId=${userId}`);
-      if (response.success && response.active) {
-        return response.active;
-      }
-      return null;
-    } catch (error) {
-      console.error('Get active QR error:', error);
-      return null;
-    }
-  }
-
   async deactivateQRCode(qrId: string): Promise<boolean> {
     try {
       await apiClient.put(`/qr/${qrId}/deactivate`);
@@ -430,35 +451,15 @@ class DataService {
   // NOTULENSI MANAGEMENT
   // ============================================
 
-  async saveNotulensi(
-    judul: string,
-    jenisKegiatan: string,
-    isi: string,
-    foto?: string,
-    hari?: string,
-    jam?: string,
-    tempat?: string,
-    agenda?: string,
-    signature?: string,
-    pemandu?: string
-  ): Promise<boolean> {
+  async saveNotulensi(data: Partial<NotulensiRecord>): Promise<boolean> {
     try {
       const currentUser = authService.getCurrentUser();
       if (!currentUser) return false;
 
       await apiClient.post('/notulensi', {
+        ...data,
         userId: currentUser.id,
-        namaUser: currentUser.nama,
-        judul,
-        jenisKegiatan,
-        isi,
-        foto,
-        hari,
-        jam,
-        tempat,
-        agenda,
-        signature,
-        pemandu
+        namaUser: currentUser.nama
       });
 
       return true;
@@ -477,24 +478,6 @@ class DataService {
     }
   }
 
-  async getNotulensiToday(): Promise<NotulensiRecord[]> {
-    try {
-      return await apiClient.get<NotulensiRecord[]>('/notulensi?today=true');
-    } catch (error) {
-      console.error('Get notulensi today error:', error);
-      return [];
-    }
-  }
-
-  async getNotulensiThisMonth(): Promise<NotulensiRecord[]> {
-    try {
-      return await apiClient.get<NotulensiRecord[]>('/notulensi?month=true');
-    } catch (error) {
-      console.error('Get notulensi this month error:', error);
-      return [];
-    }
-  }
-
   async updateNotulensi(
     id: string,
     updates: Partial<NotulensiRecord>
@@ -508,6 +491,15 @@ class DataService {
     }
   }
 
+  async broadcastNotulensi(id: string): Promise<{ success: boolean; message: string }> {
+    try {
+      return await apiClient.post<{ success: boolean; message: string }>(`/notulensi/${id}/broadcast`);
+    } catch (error: any) {
+      console.error('Broadcast error:', error);
+      return { success: false, message: error.response?.data?.message || 'Gagal broadcast notula' };
+    }
+  }
+
   async deleteNotulensi(id: string): Promise<boolean> {
     try {
       await apiClient.delete(`/notulensi/${id}`);
@@ -518,71 +510,16 @@ class DataService {
     }
   }
 
-  async deleteAllNotulensi(): Promise<boolean> {
-    try {
-      await apiClient.delete('/notulensi');
-      return true;
-    } catch (error) {
-      console.error('Delete all notulensi error:', error);
-      return false;
-    }
-  }
-
   // ============================================
   // UNDANGAN MANAGEMENT
   // ============================================
 
-  async saveUndangan(undangan: Omit<UndanganRecord, 'id'>): Promise<boolean> {
+  async saveUndangan(undangan: Omit<UndanganRecord, 'id' | 'createdAt'>): Promise<boolean> {
     try {
-      await apiClient.post('/undangan', {
-        userId: undangan.userId,
-        namaUser: undangan.namaUser,
-        tempat: undangan.tempat,
-        tanggal: undangan.tanggal,
-        nomorSurat: undangan.nomorSurat,
-        sifat: undangan.sifat,
-        lampiran: undangan.lampiran,
-        perihal: undangan.perihal,
-        kepada: undangan.kepada,
-        isiSurat: undangan.isiSurat,
-        hariTanggalWaktu: undangan.hariTanggalWaktu,
-        tempatKegiatan: undangan.tempatKegiatan,
-        tandaTangan: undangan.tandaTangan,
-        jabatanPenandatangan: undangan.jabatanPenandatangan,
-        nip: undangan.nip,
-        isiPenutup: undangan.isiPenutup,
-        isUploadedFile: undangan.isUploadedFile,
-        uploadedFileName: undangan.uploadedFileName,
-        uploadedFileType: undangan.uploadedFileType,
-        uploadedFileData: undangan.uploadedFileData,
-        uploadedFileSize: undangan.uploadedFileSize
-      });
-
+      await apiClient.post('/undangan', undangan);
       return true;
     } catch (error) {
       console.error('Save undangan error:', error);
-      return false;
-    }
-  }
-
-  async getUndanganList(): Promise<UndanganRecord[]> {
-    try {
-      return await apiClient.get<UndanganRecord[]>('/undangan');
-    } catch (error) {
-      console.error('Get undangan list error:', error);
-      return [];
-    }
-  }
-
-  async updateUndangan(
-    id: string,
-    updates: Partial<UndanganRecord>
-  ): Promise<boolean> {
-    try {
-      await apiClient.put(`/undangan/${id}`, updates);
-      return true;
-    } catch (error) {
-      console.error('Update undangan error:', error);
       return false;
     }
   }
@@ -597,50 +534,105 @@ class DataService {
     }
   }
 
+  async getUndanganList(): Promise<UndanganRecord[]> {
+    try {
+      return await apiClient.get<UndanganRecord[]>('/undangan');
+    } catch (error) {
+      console.error('Get undangan list error:', error);
+      return [];
+    }
+  }
+
   // ============================================
-  // STATISTICS
+  // JADWAL RAPAT MANAGEMENT
   // ============================================
 
-  async getAbsensiStats() {
-    const today = await this.getAbsensiTodayNonGuest();
-    const thisMonth = await this.getAbsensiThisMonthNonGuest();
+  async saveJadwalRapat(data: {
+    judul: string;
+    jenisKegiatan?: string;
+    deskripsi?: string;
+    tanggal: string;
+    jamMulai: string;
+    jamSelesai: string;
+    tim: string[];
+    peserta: string[];
+    pesertaMode?: 'publik' | 'akun';
+    pesertaSpesifik?: string[];
+    repeatType?: string;
+    repeatDays?: number[];
+    repeatUntil?: string;
+    allowStack?: boolean;
+    openOffsetMinutes?: number;
+    closeOffsetMinutes?: number;
+    latenessThresholdMinutes?: number;
+  }): Promise<{ success: boolean; ids?: string[]; message?: string }> {
+    try {
+      const currentUser = authService.getCurrentUser();
+      if (!currentUser || currentUser.role !== 'admin') {
+        return { success: false, message: 'Hanya admin yang dapat membuat jadwal' };
+      }
 
-    const todayByActivity = today.reduce((acc, curr) => {
-      acc[curr.jenisKegiatan] = (acc[curr.jenisKegiatan] || 0) + 1;
-      return acc;
-    }, {} as Record<string, number>);
-
-    return {
-      totalToday: today.length,
-      totalThisMonth: thisMonth.length,
-      todayByActivity
-    };
+      return await apiClient.post<{ success: boolean; ids?: string[]; message?: string }>('/jadwal-rapat', {
+        ...data,
+        createdBy: currentUser.id
+      });
+    } catch (error: any) {
+      console.error('Save jadwal rapat error:', error);
+      return { success: false, message: error.response?.data?.message || 'Gagal menyimpan jadwal' };
+    }
   }
 
-  async getNotulensiStats() {
-    const all = await this.getNotulensiList();
-    const today = await this.getNotulensiToday();
-    const thisMonth = await this.getNotulensiThisMonth();
-
-    const contributors = new Set(all.map(n => n.userId)).size;
-
-    return {
-      totalAll: all.length,
-      totalToday: today.length,
-      totalThisMonth: thisMonth.length,
-      contributors
-    };
+  async getJadwalRapat(): Promise<JadwalRapat[]> {
+    try {
+      return await apiClient.get<JadwalRapat[]>('/jadwal-rapat');
+    } catch (error) {
+      console.error('Get jadwal rapat error:', error);
+      return [];
+    }
   }
 
-  // Export functions (placeholders)
-  exportAbsensiToPDF(data: AbsensiRecord[], title: string) {
-    console.log('Exporting absensi to PDF:', { data, title });
+  async getUsersByKategori(kategori?: string): Promise<any[]> {
+    try {
+      const url = kategori ? `/users/by-kategori?kategori=${encodeURIComponent(kategori)}` : '/users/by-kategori';
+      return await apiClient.get<any[]>(url);
+    } catch (error) {
+      console.error('Get users by kategori error:', error);
+      return [];
+    }
   }
 
-  exportNotulensiToPDF(notulensi: NotulensiRecord) {
-    console.log('Exporting notulensi to PDF:', notulensi);
+  async getActiveJadwal(tim?: string, kategori?: string): Promise<JadwalRapat[]> {
+    try {
+      const params = new URLSearchParams();
+      if (tim) params.append('tim', tim);
+      if (kategori) params.append('kategori', kategori);
+      const query = params.toString() ? `?${params.toString()}` : '';
+      return await apiClient.get<JadwalRapat[]>(`/jadwal-rapat/active${query}`);
+    } catch (error) {
+      console.error('Get active jadwal error:', error);
+      return [];
+    }
+  }
+
+  async updateJadwalRapat(id: string, updates: Partial<JadwalRapat>): Promise<boolean> {
+    try {
+      await apiClient.put(`/jadwal-rapat/${id}`, updates);
+      return true;
+    } catch (error) {
+      console.error('Update jadwal rapat error:', error);
+      return false;
+    }
+  }
+
+  async deleteJadwalRapat(id: string): Promise<boolean> {
+    try {
+      await apiClient.delete(`/jadwal-rapat/${id}`);
+      return true;
+    } catch (error) {
+      console.error('Delete jadwal rapat error:', error);
+      return false;
+    }
   }
 }
 
 export const dataService = new DataService();
-

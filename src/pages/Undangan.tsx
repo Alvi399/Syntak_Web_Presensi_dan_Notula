@@ -3,61 +3,50 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
-import { Mail, Plus, Edit, Trash2, Download, Eye, Users, Calendar, TrendingUp, FileText, Send, Clock, Upload, File, FileImage, FileType } from 'lucide-react';
+import { Mail, Trash2, Download, Eye, Users, Calendar, FileText, Upload, File, FileImage, FileType, Radio } from 'lucide-react';
 import { authService } from '@/lib/authService';
-import { dataService, type UndanganRecord } from '@/lib/dataService';
-import SignaturePad from '@/components/SignaturePad';
+import { dataService, type UndanganRecord, type JadwalRapat } from '@/lib/dataService';
 
 export default function Undangan() {
   const [undanganList, setUndanganList] = useState<UndanganRecord[]>([]);
-  const [isDialogOpen, setIsDialogOpen] = useState(false);
+  const [activeJadwals, setActiveJadwals] = useState<JadwalRapat[]>([]);
   const [isUploadDialogOpen, setIsUploadDialogOpen] = useState(false);
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
-  const [editingUndangan, setEditingUndangan] = useState<UndanganRecord | null>(null);
   const [previewUndangan, setPreviewUndangan] = useState<UndanganRecord | null>(null);
-  const [formData, setFormData] = useState({
-    tempat: 'Surabaya',
-    tanggal: '',
-    nomorSurat: '',
-    sifat: 'Biasa',
-    lampiran: '',
-    perihal: '',
-    kepada: '',
-    isiPembuka: '',
-    hariTanggalWaktu: '',
-    tempatKegiatan: '',
-    alamatKegiatan: '',
-    acara: '',
-    isiPenutup: '',
-    tandaTangan: '',
-    namaPenandatangan: '',
-    jabatanPenandatangan: 'Kepala Badan',
-    nip: ''
-  });
   const [message, setMessage] = useState({ type: '', text: '' });
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [signatureMethod, setSignatureMethod] = useState<'draw' | 'none'>('none');
-  const signaturePadRef = useRef<any>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   
   // State untuk upload file
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploadPreview, setUploadPreview] = useState<string>('');
-  const [uploadMetadata, setUploadMetadata] = useState({
-    perihal: '',
-    deskripsi: ''
-  });
+  const [selectedJadwalId, setSelectedJadwalId] = useState<string>('');
+  const [isBroadcasting, setIsBroadcasting] = useState<string | null>(null); // id of undangan being broadcast
   
   const currentUser = authService.getCurrentUser();
 
   useEffect(() => {
     loadUndangan();
+    loadActiveJadwal();
   }, []);
+
+  const loadActiveJadwal = async () => {
+    try {
+       const jadwals = await dataService.getActiveJadwal(currentUser?.tim, currentUser?.kategori);
+       setActiveJadwals(jadwals || []);
+    
+    // Auto-select first schedule if available
+    if (jadwals && jadwals.length > 0) {
+      setSelectedJadwalId(jadwals[0].id);
+    }
+    } catch (error) {
+       console.error("Gagal memuat jadwal aktif", error);
+    }
+  };
 
   const loadUndangan = async () => {
     const data = await dataService.getUndanganList();
@@ -108,47 +97,52 @@ export default function Undangan() {
     setMessage({ type: '', text: '' });
 
     try {
-      const reader = new FileReader();
-      reader.onload = async (e) => {
-        const fileData = e.target?.result as string;
+      const selectedJadwal = activeJadwals.find(j => j.id === selectedJadwalId);
+      const perihal = selectedJadwal ? `Undangan ${selectedJadwal.judul}` : uploadFile.name;
 
-        const success = await dataService.saveUndangan({
-          userId: currentUser?.id || '',
-          namaUser: currentUser?.nama || '',
-          tempat: 'Surabaya',
-          tanggal: new Date().toISOString().split('T')[0],
-          nomorSurat: '-',
-          sifat: 'Biasa',
-          lampiran: uploadFile.name,
-          perihal: uploadMetadata.perihal || uploadFile.name,
-          kepada: uploadMetadata.deskripsi || 'File undangan eksternal',
-          isiSurat: `File undangan yang diunggah: ${uploadFile.name}`,
-          hariTanggalWaktu: '-',
-          tempatKegiatan: '-',
-          tandaTangan: '',
-          jabatanPenandatangan: currentUser?.nama || '',
-          nip: '',
-          createdAt: new Date().toISOString(),
-          isUploadedFile: true,
-          uploadedFileName: uploadFile.name,
-          uploadedFileType: uploadFile.type,
-          uploadedFileData: fileData,
-          uploadedFileSize: uploadFile.size
-        });
+      // Wrap FileReader in a Promise so await works correctly
+      const fileData = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (ev) => resolve(ev.target?.result as string);
+        reader.onerror = () => reject(new Error('Gagal membaca file'));
+        reader.readAsDataURL(uploadFile);
+      });
 
-        if (success) {
-          setMessage({ type: 'success', text: 'File undangan berhasil diunggah!' });
-          resetUploadForm();
-          await loadUndangan();
-          setIsUploadDialogOpen(false);
-        } else {
-          setMessage({ type: 'error', text: 'Gagal mengunggah file' });
-        }
-      };
+      const success = await dataService.saveUndangan({
+        userId: currentUser?.id || '',
+        namaUser: currentUser?.nama || '',
+        tempat: 'Surabaya',
+        tanggal: new Date().toISOString().split('T')[0],
+        nomorSurat: '-',
+        sifat: 'Biasa',
+        lampiran: uploadFile.name,
+        perihal: perihal,
+        kepada: 'File undangan eksternal',
+        isiSurat: `File undangan yang diunggah: ${uploadFile.name}`,
+        hariTanggalWaktu: selectedJadwal ? `${selectedJadwal.tanggal}, ${selectedJadwal.jamMulai} - ${selectedJadwal.jamSelesai}` : '-',
+        tempatKegiatan: '-',
+        idKegiatan: selectedJadwalId || undefined,
+        tandaTangan: '',
+        jabatanPenandatangan: currentUser?.nama || '',
+        nip: '',
+        isUploadedFile: true,
+        uploadedFileName: uploadFile.name,
+        uploadedFileType: uploadFile.type,
+        uploadedFileData: fileData,
+        uploadedFileSize: uploadFile.size
+      });
 
-      reader.readAsDataURL(uploadFile);
+      if (success) {
+        setMessage({ type: 'success', text: 'File undangan berhasil diunggah!' });
+        resetUploadForm();
+        await loadUndangan();
+        setIsUploadDialogOpen(false);
+      } else {
+        setMessage({ type: 'error', text: 'Gagal mengunggah file. Silakan coba lagi.' });
+      }
     } catch (error) {
-      setMessage({ type: 'error', text: 'Terjadi kesalahan saat mengunggah file' });
+      console.error('Upload error:', error);
+      setMessage({ type: 'error', text: 'Terjadi kesalahan saat mengunggah file.' });
     } finally {
       setIsSubmitting(false);
     }
@@ -157,7 +151,7 @@ export default function Undangan() {
   const resetUploadForm = () => {
     setUploadFile(null);
     setUploadPreview('');
-    setUploadMetadata({ perihal: '', deskripsi: '' });
+    setSelectedJadwalId('');
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
     }
@@ -187,241 +181,55 @@ export default function Undangan() {
     return <File className="w-5 h-5 text-gray-600" />;
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setIsSubmitting(true);
-    setMessage({ type: '', text: '' });
-
+  const handleDelete = async (id: string) => {
     try {
-      let success = false;
-
-      if (editingUndangan) {
-        success = await dataService.updateUndangan(editingUndangan.id, {
-          tempat: formData.tempat,
-          tanggal: formData.tanggal,
-          nomorSurat: formData.nomorSurat,
-          sifat: formData.sifat,
-          lampiran: formData.lampiran,
-          perihal: formData.perihal,
-          kepada: formData.kepada,
-          isiSurat: formData.isiPembuka,
-          hariTanggalWaktu: formData.hariTanggalWaktu,
-          tempatKegiatan: `${formData.tempatKegiatan}\n${formData.alamatKegiatan}`,
-          tandaTangan: formData.tandaTangan,
-          jabatanPenandatangan: formData.jabatanPenandatangan,
-          nip: formData.nip,
-          isiPenutup: formData.isiPenutup
-        });
-      } else {
-        success = await dataService.saveUndangan({
-          userId: currentUser?.id || '',
-          namaUser: currentUser?.nama || '',
-          tempat: formData.tempat,
-          tanggal: formData.tanggal,
-          nomorSurat: formData.nomorSurat,
-          sifat: formData.sifat,
-          lampiran: formData.lampiran,
-          perihal: formData.perihal,
-          kepada: formData.kepada,
-          isiSurat: formData.isiPembuka,
-          hariTanggalWaktu: formData.hariTanggalWaktu,
-          tempatKegiatan: `${formData.tempatKegiatan}\n${formData.alamatKegiatan}`,
-          tandaTangan: formData.tandaTangan,
-          jabatanPenandatangan: formData.jabatanPenandatangan,
-          nip: formData.nip,
-          createdAt: new Date().toISOString(),
-          isiPenutup: formData.isiPenutup
-        });
-      }
-
-      if (success) {
-        setMessage({ 
-          type: 'success', 
-          text: editingUndangan ? 'Undangan berhasil diperbarui!' : 'Undangan berhasil dibuat!' 
-        });
-        resetForm();
-        await loadUndangan();
-        setIsDialogOpen(false);
-      } else {
-        setMessage({ type: 'error', text: 'Gagal menyimpan undangan' });
+      if (window.confirm("Apakah Anda yakin ingin menghapus surat undangan ini?")) {
+        const success = await dataService.deleteUndangan(id);
+        if (success) {
+          setMessage({ type: 'success', text: 'Undangan berhasil dihapus!' });
+          await loadUndangan();
+        } else {
+          setMessage({ type: 'error', text: 'Gagal menghapus undangan' });
+        }
       }
     } catch (error) {
-      setMessage({ type: 'error', text: 'Terjadi kesalahan sistem' });
-    } finally {
-      setIsSubmitting(false);
+      console.error("Error deleting undangan:", error);
+      setMessage({ type: 'error', text: 'Terjadi kesalahan saat menghapus undangan.' });
     }
   };
 
-  const handleEdit = (undangan: UndanganRecord) => {
-    if (undangan.isUploadedFile) {
-      setMessage({ type: 'error', text: 'File upload tidak dapat diedit. Silakan hapus dan unggah ulang jika perlu.' });
+  const handleBroadcast = async (undangan: UndanganRecord) => {
+    if (!undangan.idKegiatan) {
+      setMessage({ type: 'error', text: 'Undangan ini tidak terhubung ke jadwal kegiatan.' });
       return;
     }
+    if (!window.confirm(`Broadcast undangan "${undangan.perihal}" ke semua peserta jadwal ini?`)) return;
 
-    setEditingUndangan(undangan);
-    const [tempat, alamat] = (undangan.tempatKegiatan || '').split('\n');
-    setFormData({
-      tempat: undangan.tempat,
-      tanggal: undangan.tanggal,
-      nomorSurat: undangan.nomorSurat,
-      sifat: undangan.sifat,
-      lampiran: undangan.lampiran || '',
-      perihal: undangan.perihal,
-      kepada: undangan.kepada,
-      isiPembuka: undangan.isiSurat,
-      hariTanggalWaktu: undangan.hariTanggalWaktu,
-      tempatKegiatan: tempat || '',
-      alamatKegiatan: alamat || '',
-      acara: '',
-      isiPenutup: undangan.isiPenutup || 'Demikian atas perhatian dan kehadiran Saudara disampaikan terima kasih.',
-      tandaTangan: undangan.tandaTangan || '',
-      namaPenandatangan: currentUser?.nama || '',
-      jabatanPenandatangan: undangan.jabatanPenandatangan || 'Kepala Badan',
-      nip: undangan.nip || ''
-    });
-    setSignatureMethod(undangan.tandaTangan ? 'draw' : 'none');
-    setIsDialogOpen(true);
-  };
-
-  const handleDelete = async (id: string) => {
-    if (window.confirm('Apakah Anda yakin ingin menghapus undangan ini?')) {
-      const success = await dataService.deleteUndangan(id);
-      if (success) {
-        setMessage({ type: 'success', text: 'Undangan berhasil dihapus!' });
-        await loadUndangan();
+    setIsBroadcasting(undangan.id);
+    setMessage({ type: '', text: '' });
+    try {
+      const backendBase = import.meta.env.VITE_API_URL?.replace('/api', '') || 'http://localhost:3001';
+      const res = await fetch(`${backendBase}/api/undangan/${undangan.id}/broadcast`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ broadcasterId: currentUser?.id }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setMessage({ type: 'success', text: `📢 Broadcast dimulai ke ${data.total} peserta. Lihat progress bar di bawah layar.` });
       } else {
-        setMessage({ type: 'error', text: 'Gagal menghapus undangan' });
+        setMessage({ type: 'error', text: data.message || 'Gagal memulai broadcast.' });
       }
+    } catch (err) {
+      setMessage({ type: 'error', text: 'Terjadi kesalahan saat broadcast.' });
+    } finally {
+      setIsBroadcasting(null);
     }
   };
 
   const handlePreview = (undangan: UndanganRecord) => {
     setPreviewUndangan(undangan);
     setIsPreviewOpen(true);
-  };
-
-  const generatePDFContent = (undangan: UndanganRecord) => {
-    const tanggalFormatted = new Date(undangan.tanggal).toLocaleDateString('id-ID', {
-      day: 'numeric',
-      month: 'long',
-      year: 'numeric'
-    });
-
-    return `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <meta charset="UTF-8">
-        <title>Surat Undangan - ${undangan.perihal}</title>
-        <style>
-          @page { margin: 2.5cm 2cm; size: A4; }
-          body { 
-            font-family: 'Times New Roman', serif;
-            font-size: 12pt;
-            line-height: 1.5;
-            color: #000;
-          }
-          .header {
-            text-align: left;
-            border-bottom: 2px solid #000;
-            padding-bottom: 15px;
-            margin-bottom: 30px;
-          }
-          .header img { max-height: 80px; margin-bottom: 10px; }
-          .metadata { margin: 30px 0; line-height: 1.8; }
-          .metadata-row { display: flex; margin-bottom: 5px; }
-          .metadata-label { width: 100px; display: inline-block; }
-          .metadata-value { flex: 1; }
-          .recipient { margin: 20px 0; line-height: 1.6; }
-          .content { text-align: justify; margin: 20px 0; line-height: 1.6; }
-          .content p { margin: 10px 0; }
-          .kegiatan-detail { margin: 20px 0 20px 40px; line-height: 1.8; }
-          .kegiatan-detail div { display: flex; margin-bottom: 5px; }
-          .kegiatan-label { width: 120px; display: inline-block; }
-          .signature-section { margin-top: 60px; display: flex; justify-content: flex-end; }
-          .signature-box { text-align: center; width: 250px; }
-          .signature-image { margin: 20px 0; min-height: 60px; }
-          .signature-image img { max-width: 120px; max-height: 60px; }
-          .name-line { border-top: 1px solid #000; padding-top: 5px; margin-top: 10px; font-weight: bold; }
-          .closing { margin: 20px 0; text-align: justify; }
-        </style>
-      </head>
-      <body>
-        <div class="header">
-          <img src="/Kop Undangan.png" alt="Kop Undangan" />
-        </div>
-        <div style="text-right; margin-bottom: 20px;">${undangan.tempat}, ${tanggalFormatted}</div>
-        <div class="metadata">
-          <div class="metadata-row"><span class="metadata-label">Nomor</span><span class="metadata-value">: ${undangan.nomorSurat}</span></div>
-          <div class="metadata-row"><span class="metadata-label">Sifat</span><span class="metadata-value">: ${undangan.sifat}</span></div>
-          <div class="metadata-row"><span class="metadata-label">Lampiran</span><span class="metadata-value">: ${undangan.lampiran || '-'}</span></div>
-          <div class="metadata-row"><span class="metadata-label">Hal</span><span class="metadata-value">: ${undangan.perihal}</span></div>
-        </div>
-        <div class="recipient"><p>Yth. ${undangan.kepada}</p></div>
-        <div class="content">
-          <p>${undangan.isiSurat}</p>
-          <div class="kegiatan-detail">
-            <div><span class="kegiatan-label">hari/tanggal</span><span>: ${undangan.hariTanggalWaktu.split(',')[0] || ''}</span></div>
-            <div><span class="kegiatan-label">waktu</span><span>: ${undangan.hariTanggalWaktu.split(',').slice(1).join(',') || ''}</span></div>
-            <div><span class="kegiatan-label">tempat</span><span>: ${undangan.tempatKegiatan.split('\n')[0] || ''}</span></div>
-            <div><span class="kegiatan-label">alamat</span><span>: ${undangan.tempatKegiatan.split('\n')[1] || ''}</span></div>
-          </div>
-          <p class="closing">${undangan.isiPenutup || 'Demikian atas perhatian dan kehadiran Saudara disampaikan terima kasih.'}</p>
-        </div>
-        <div class="signature-section">
-          <div class="signature-box">
-            <p>${undangan.jabatanPenandatangan}</p>
-            <div class="signature-image">${undangan.tandaTangan ? `<img src="${undangan.tandaTangan}" alt="Tanda Tangan" />` : ''}</div>
-            <div class="name-line">${undangan.namaUser}</div>
-            <p style="margin: 5px 0; font-size: 11pt;">${undangan.nip || 'NIP. -'}</p>
-          </div>
-        </div>
-      </body>
-      </html>
-    `;
-  };
-
-  const handleDownload = (undangan: UndanganRecord) => {
-    if (undangan.isUploadedFile) {
-      handleDownloadUploadedFile(undangan);
-      return;
-    }
-
-    const htmlContent = generatePDFContent(undangan);
-    const blob = new Blob([htmlContent], { type: 'text/html' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `Undangan_${undangan.perihal.replace(/\s+/g, '_')}_${new Date(undangan.tanggal).getTime()}.html`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-  };
-
-  const resetForm = () => {
-    setFormData({
-      tempat: 'Surabaya',
-      tanggal: '',
-      nomorSurat: '',
-      sifat: 'Biasa',
-      lampiran: '',
-      perihal: '',
-      kepada: '',
-      isiPembuka: '',
-      hariTanggalWaktu: '',
-      tempatKegiatan: '',
-      alamatKegiatan: '',
-      acara: '',
-      isiPenutup: '',
-      tandaTangan: '',
-      namaPenandatangan: '',
-      jabatanPenandatangan: 'Kepala Badan',
-      nip: ''
-    });
-    setEditingUndangan(null);
-    setMessage({ type: '', text: '' });
-    setSignatureMethod('none');
   };
 
   const thisMonthCount = undanganList.filter(u => {
@@ -466,279 +274,6 @@ export default function Undangan() {
           </div>
           
           <div className="flex gap-2">
-            {/* Tombol Buat Undangan */}
-            <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
-              <DialogTrigger asChild>
-                <Button 
-                  onClick={resetForm}
-                  className="bg-white text-orange-700 hover:bg-orange-50"
-                >
-                  <Plus className="w-4 h-4 mr-2" />
-                  Buat Undangan
-                </Button>
-              </DialogTrigger>
-              <DialogContent className="max-w-5xl max-h-[90vh] overflow-y-auto">
-                <DialogHeader>
-                  <DialogTitle className="text-2xl">
-                    {editingUndangan ? 'Edit Undangan' : 'Buat Undangan Baru'}
-                  </DialogTitle>
-                  <DialogDescription>
-                    Isi form di bawah untuk membuat surat undangan resmi BPS
-                  </DialogDescription>
-                </DialogHeader>
-                <form onSubmit={handleSubmit} className="space-y-6">
-                  <div className="bg-orange-50 p-5 rounded-xl border-2 border-orange-200">
-                    <h3 className="font-semibold mb-4 flex items-center gap-2">
-                      <FileText className="w-5 h-5 text-orange-600" />
-                      Informasi Surat
-                    </h3>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      <div className="space-y-2">
-                        <Label htmlFor="tempat">Tempat</Label>
-                        <Input
-                          id="tempat"
-                          value={formData.tempat}
-                          onChange={(e) => setFormData({ ...formData, tempat: e.target.value })}
-                          placeholder="Surabaya"
-                          required
-                        />
-                      </div>
-                      <div className="space-y-2">
-                        <Label htmlFor="tanggal">Tanggal</Label>
-                        <Input
-                          id="tanggal"
-                          type="date"
-                          value={formData.tanggal}
-                          onChange={(e) => setFormData({ ...formData, tanggal: e.target.value })}
-                          required
-                        />
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
-                      <div className="space-y-2">
-                        <Label htmlFor="nomorSurat">Nomor Surat</Label>
-                        <Input
-                          id="nomorSurat"
-                          value={formData.nomorSurat}
-                          onChange={(e) => setFormData({ ...formData, nomorSurat: e.target.value })}
-                          placeholder="000.3475/436.8.1/2025"
-                          required
-                        />
-                      </div>
-                      <div className="space-y-2">
-                        <Label htmlFor="sifat">Sifat</Label>
-                        <Select 
-                          onValueChange={(value) => setFormData({ ...formData, sifat: value })}
-                          value={formData.sifat}
-                        >
-                          <SelectTrigger>
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="Biasa">Biasa</SelectItem>
-                            <SelectItem value="Penting">Penting</SelectItem>
-                            <SelectItem value="Segera">Segera</SelectItem>
-                            <SelectItem value="Rahasia">Rahasia</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </div>
-                      <div className="space-y-2">
-                        <Label htmlFor="lampiran">Lampiran</Label>
-                        <Input
-                          id="lampiran"
-                          value={formData.lampiran}
-                          onChange={(e) => setFormData({ ...formData, lampiran: e.target.value })}
-                          placeholder="- atau nama file"
-                        />
-                      </div>
-                    </div>
-
-                    <div className="space-y-2 mt-4">
-                      <Label htmlFor="perihal">Hal (Perihal)</Label>
-                      <Input
-                        id="perihal"
-                        value={formData.perihal}
-                        onChange={(e) => setFormData({ ...formData, perihal: e.target.value })}
-                        placeholder="Undangan"
-                        required
-                      />
-                    </div>
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label htmlFor="kepada">Yth. (Ditujukan Kepada)</Label>
-                    <Textarea
-                      id="kepada"
-                      value={formData.kepada}
-                      onChange={(e) => setFormData({ ...formData, kepada: e.target.value })}
-                      placeholder="(Daftar Nama Terlampir)&#10;atau&#10;Seluruh Staff BPS Kota Surabaya"
-                      rows={3}
-                      className="resize-none"
-                      required
-                    />
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label htmlFor="isiPembuka">Isi Surat (Paragraf Pembuka)</Label>
-                    <Textarea
-                      id="isiPembuka"
-                      value={formData.isiPembuka}
-                      onChange={(e) => setFormData({ ...formData, isiPembuka: e.target.value })}
-                      placeholder="Dalam rangka Pelaksanaan Pembinaan Kelurahan Cinta Statistik (Kelurahan Cantik) Tahun 2025, maka dengan ini mengharap kehadiran Saudara pada:"
-                      rows={4}
-                      className="resize-none"
-                      required
-                    />
-                  </div>
-
-                  <div className="bg-blue-50 p-5 rounded-xl border-2 border-blue-200">
-                    <h3 className="font-semibold mb-4 flex items-center gap-2">
-                      <Calendar className="w-5 h-5 text-blue-600" />
-                      Detail Kegiatan
-                    </h3>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      <div className="space-y-2">
-                        <Label htmlFor="hariTanggalWaktu">Hari/Tanggal/Waktu</Label>
-                        <Input
-                          id="hariTanggalWaktu"
-                          value={formData.hariTanggalWaktu}
-                          onChange={(e) => setFormData({ ...formData, hariTanggalWaktu: e.target.value })}
-                          placeholder="Kamis, 22 Mei 2025, 08:30 WIB - Selesai"
-                          required
-                        />
-                      </div>
-                      <div className="space-y-2">
-                        <Label htmlFor="tempatKegiatan">Tempat Kegiatan</Label>
-                        <Input
-                          id="tempatKegiatan"
-                          value={formData.tempatKegiatan}
-                          onChange={(e) => setFormData({ ...formData, tempatKegiatan: e.target.value })}
-                          placeholder="Taman Kelurahan Jemur Wonosari"
-                          required
-                        />
-                      </div>
-                    </div>
-                    <div className="space-y-2 mt-4">
-                      <Label htmlFor="alamatKegiatan">Alamat Kegiatan</Label>
-                      <Input
-                        id="alamatKegiatan"
-                        value={formData.alamatKegiatan}
-                        onChange={(e) => setFormData({ ...formData, alamatKegiatan: e.target.value })}
-                        placeholder="Jl. Jemursari V, Jemur Wonosari, Kec. Wonocolo, Surabaya"
-                        required
-                      />
-                    </div>
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label htmlFor="isiPenutup">Penutup Surat</Label>
-                    <Textarea
-                      id="isiPenutup"
-                      value={formData.isiPenutup}
-                      onChange={(e) => setFormData({ ...formData, isiPenutup: e.target.value })}
-                      placeholder="Demikian atas perhatian dan kehadiran Saudara disampaikan terima kasih."
-                      rows={3}
-                      className="resize-none"
-                    />
-                  </div>
-
-                  <div className="space-y-4 bg-gray-50 p-5 rounded-xl border-2 border-gray-200">
-                    <h3 className="font-semibold flex items-center gap-2">
-                      <Send className="w-5 h-5 text-gray-600" />
-                      Tanda Tangan & Data Penandatangan
-                    </h3>
-                    
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      <div className="space-y-2">
-                        <Label htmlFor="jabatanPenandatangan">Jabatan</Label>
-                        <Input
-                          id="jabatanPenandatangan"
-                          value={formData.jabatanPenandatangan}
-                          onChange={(e) => setFormData({ ...formData, jabatanPenandatangan: e.target.value })}
-                          placeholder="Kepala Badan"
-                          required
-                        />
-                      </div>
-                      <div className="space-y-2">
-                        <Label htmlFor="nip">NIP</Label>
-                        <Input
-                          id="nip"
-                          value={formData.nip}
-                          onChange={(e) => setFormData({ ...formData, nip: e.target.value })}
-                          placeholder="196502131986031008"
-                        />
-                      </div>
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label>Tanda Tangan</Label>
-                      <div className="flex gap-2 mb-4">
-                        <Button
-                          type="button"
-                          variant={signatureMethod === 'none' ? 'default' : 'outline'}
-                          size="sm"
-                          onClick={() => {
-                            setSignatureMethod('none');
-                            setFormData({ ...formData, tandaTangan: '' });
-                          }}
-                        >
-                          Tidak Ada Tanda Tangan
-                        </Button>
-                        <Button
-                          type="button"
-                          variant={signatureMethod === 'draw' ? 'default' : 'outline'}
-                          size="sm"
-                          onClick={() => setSignatureMethod('draw')}
-                        >
-                          Gambar Tanda Tangan
-                        </Button>
-                      </div>
-
-                      {signatureMethod === 'draw' && (
-                        <div className="border-2 border-dashed border-gray-300 rounded-xl p-1 hover:border-orange-400 transition-colors">
-                          <SignaturePad
-                            onSignatureChange={(sig) => setFormData({ ...formData, tandaTangan: sig })}
-                            width={undefined}
-                            height={150}
-                          />
-                        </div>
-                      )}
-                    </div>
-                  </div>
-
-                  {message.text && (
-                    <Alert className={`${message.type === 'error' ? 'border-red-300 bg-red-50' : 'border-green-300 bg-green-50'} border-2`}>
-                      <AlertDescription className={`${message.type === 'error' ? 'text-red-700' : 'text-green-700'} font-medium`}>
-                        {message.type === 'success' ? '✅ ' : '❌ '}
-                        {message.text}
-                      </AlertDescription>
-                    </Alert>
-                  )}
-
-                  <div className="flex justify-end gap-2 pt-4 border-t">
-                    <Button 
-                      type="button" 
-                      variant="outline" 
-                      onClick={() => setIsDialogOpen(false)}
-                    >
-                      Batal
-                    </Button>
-                    <Button type="submit" disabled={isSubmitting}>
-                      {isSubmitting ? (
-                        <>
-                          <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2" />
-                          Menyimpan...
-                        </>
-                      ) : (
-                        editingUndangan ? 'Perbarui' : 'Buat Undangan'
-                      )}
-                    </Button>
-                  </div>
-                </form>
-              </DialogContent>
-            </Dialog>
-
             {/* TOMBOL UPLOAD FILE BARU */}
             <Dialog open={isUploadDialogOpen} onOpenChange={setIsUploadDialogOpen}>
               <DialogTrigger asChild>
@@ -747,7 +282,7 @@ export default function Undangan() {
                   className="bg-green-600 text-white hover:bg-green-700"
                 >
                   <Upload className="w-4 h-4 mr-2" />
-                  Upload File
+                  Upload Undangan
                 </Button>
               </DialogTrigger>
               <DialogContent className="max-w-2xl">
@@ -846,24 +381,26 @@ export default function Undangan() {
 
                   <div className="space-y-4">
                     <div className="space-y-2">
-                      <Label htmlFor="uploadPerihal">Perihal / Judul</Label>
-                      <Input
-                        id="uploadPerihal"
-                        value={uploadMetadata.perihal}
-                        onChange={(e) => setUploadMetadata({ ...uploadMetadata, perihal: e.target.value })}
-                        placeholder="Contoh: Undangan Rapat Koordinasi"
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="uploadDeskripsi">Deskripsi (Opsional)</Label>
-                      <Textarea
-                        id="uploadDeskripsi"
-                        value={uploadMetadata.deskripsi}
-                        onChange={(e) => setUploadMetadata({ ...uploadMetadata, deskripsi: e.target.value })}
-                        placeholder="Tambahkan deskripsi singkat tentang file ini..."
-                        rows={3}
-                        className="resize-none"
-                      />
+                      <Label htmlFor="jadwal">Pilih Jadwal Kegiatan (Opsional)</Label>
+                      <Select value={selectedJadwalId} onValueChange={setSelectedJadwalId}>
+                        <SelectTrigger>
+                          <SelectValue placeholder="Pilih jadwal kegiatan yang terhubung" />
+                        </SelectTrigger>
+                        <SelectContent className="max-h-[200px]">
+                          {activeJadwals.length === 0 ? (
+                            <SelectItem value="none" disabled>Tidak ada jadwal aktif</SelectItem>
+                          ) : (
+                            activeJadwals.map(jadwal => (
+                              <SelectItem key={jadwal.id} value={jadwal.id}>
+                                {jadwal.judul} ({jadwal.tanggal})
+                              </SelectItem>
+                            ))
+                          )}
+                        </SelectContent>
+                      </Select>
+                      <p className="text-xs text-gray-500">
+                        Jika Anda memilih jadwal, informasi undangan akan disinkronisasi ke jadwal tersebut.
+                      </p>
                     </div>
                   </div>
 
@@ -1199,9 +736,9 @@ export default function Undangan() {
               Tutup
             </Button>
             {previewUndangan && (
-              <Button onClick={() => handleDownload(previewUndangan)}>
+              <Button onClick={() => handleDownloadUploadedFile(previewUndangan)}>
                 <Download className="w-4 h-4 mr-2" />
-                Download {previewUndangan.isUploadedFile ? 'File' : 'PDF'}
+                Download File
               </Button>
             )}
           </div>
@@ -1320,7 +857,7 @@ export default function Undangan() {
                       </div>
                     </div>
                     
-                    <div className="flex gap-2 ml-4 shrink-0">
+                    <div className="flex gap-2 ml-4 shrink-0 flex-wrap">
                       <Button
                         variant="outline"
                         size="sm"
@@ -1333,25 +870,32 @@ export default function Undangan() {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => handleDownload(undangan)}
+                        onClick={() => handleDownloadUploadedFile(undangan)}
                         className="hover:bg-green-50 hover:border-green-400 transition-colors"
-                        title={undangan.isUploadedFile ? "Download File" : "Download PDF"}
+                        title="Download File"
                       >
                         <Download className="w-4 h-4" />
                       </Button>
+                      {/* Broadcast button — admin only or owner, only for linked undangan */}
+                      {(currentUser?.role === 'admin' || currentUser?.id === undangan.userId) && undangan.idKegiatan && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => handleBroadcast(undangan)}
+                          disabled={isBroadcasting === undangan.id}
+                          className="hover:bg-purple-50 hover:border-purple-400 text-purple-600 hover:text-purple-700 transition-colors"
+                          title="Broadcast ke Peserta"
+                        >
+                          {isBroadcasting === undangan.id ? (
+                            <Radio className="w-4 h-4 animate-pulse" />
+                          ) : (
+                            <Radio className="w-4 h-4" />
+                          )}
+                          <span className="ml-1 text-xs hidden sm:inline">Broadcast</span>
+                        </Button>
+                      )}
                       {(currentUser?.id === undangan.userId || currentUser?.role === 'admin') && (
                         <>
-                          {!undangan.isUploadedFile && (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => handleEdit(undangan)}
-                              className="hover:bg-yellow-50 hover:border-yellow-400 transition-colors"
-                              title="Edit"
-                            >
-                              <Edit className="w-4 h-4" />
-                            </Button>
-                          )}
                           <Button
                             variant="outline"
                             size="sm"
@@ -1373,8 +917,7 @@ export default function Undangan() {
               <div className="w-24 h-24 bg-orange-100 rounded-full flex items-center justify-center mx-auto mb-4">
                 <Mail className="w-12 h-12 text-orange-300" />
               </div>
-              <p className="text-lg font-medium text-gray-600 mb-2">Belum ada undangan</p>
-              <p className="text-sm text-gray-400">Klik tombol "Buat Undangan" atau "Upload File" untuk memulai</p>
+              <p className="text-sm text-gray-400">Klik tombol "Upload Undangan" untuk memulai</p>
             </div>
           )}
         </CardContent>

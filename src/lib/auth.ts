@@ -6,6 +6,8 @@ export interface User {
   kategori: 'Pegawai' | 'Magang';
   role: 'user' | 'admin';
   tanggalDaftar: string;
+  tim?: string;
+  jabatan?: string;
   isBlocked?: boolean;
   blockReason?: 'izin' | 'sakit' | 'alpa' | 'izin-telat';
   blockNote?: string;

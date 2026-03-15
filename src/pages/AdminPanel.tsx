@@ -31,16 +31,22 @@ import {
   CheckCircle2,
   Ban,
   Unlock,
-  AlertCircle
+  AlertCircle,
+  QrCode,
+  Link,
+  Copy,
+  ExternalLink
 } from 'lucide-react';
+import QRCode from 'react-qr-code';
+
 import { authService, type User, type ActivityLog } from '@/lib/authService';
-import { dataService, type AbsensiRecord, type NotulensiRecord } from '@/lib/dataService';
+import { dataService, type AbsensiRecord, type NotulensiRecord, type JadwalRapat } from '@/lib/dataService';
 import SignatureCanvas from 'react-signature-canvas';
 import jsPDF from 'jspdf';
 
-type UserRole = 'user' | 'admin';
+type UserRole = 'user' | 'admin' | 'tamu';
 type UserKategori = 'Pegawai' | 'Magang';
-type JenisKegiatan = 'senam' | 'apel' | 'rapelan' | 'doa-bersama' | 'rapat' | 'all';
+type JenisKegiatan = 'senam' | 'apel' | 'rapelan' | 'doa-bersama' | 'rapat' | 'sharing-knowledge' | 'all';
 type BlockReason = 'izin' | 'sakit' | 'alpa' | 'izin-telat' | '';
 
 export default function AdminPanel() {
@@ -59,6 +65,7 @@ export default function AdminPanel() {
     email: '',
     password: '',
     kategori: '' as UserKategori | '',
+    tim: '',
     role: '' as UserRole | ''
   });
   const [blockForm, setBlockForm] = useState({
@@ -78,6 +85,15 @@ export default function AdminPanel() {
   const [filterKegiatan, setFilterKegiatan] = useState<JenisKegiatan>('all');
   const [filterKategori, setFilterKategori] = useState<'all' | 'Pegawai' | 'Magang'>('all');
   const [filterNamaKegiatan, setFilterNamaKegiatan] = useState('');
+  const [filterTim, setFilterTim] = useState<string>('all');
+
+  // QR Modal states
+  const [showQRDialog, setShowQRDialog] = useState(false);
+  const [selectedQR, setSelectedQR] = useState<{id: string, judul: string, jenis: string} | null>(null);
+
+
+  // Jadwal Rapat states
+  const [jadwalRapatData, setJadwalRapatData] = useState<JadwalRapat[]>([]);
   
   const signaturePadRef = useRef<SignatureCanvas>(null);
   const [adminSignature, setAdminSignature] = useState<string>('');
@@ -115,18 +131,86 @@ export default function AdminPanel() {
   };
 
   const loadAdminData = async () => {
-    const [usersData, activitiesData, absensiList, notulensiList] = await Promise.all([
+    const [usersData, activitiesData, absensiList, notulensiList, jadwalList] = await Promise.all([
       authService.getAllUsersForAdmin(),
       authService.getActivities(),
       dataService.getAbsensiList(),
-      dataService.getNotulensiList()
+      dataService.getNotulensiList(),
+      dataService.getJadwalRapat()
     ]);
     
     setUsers(usersData);
     setActivities(activitiesData);
     setAbsensiData(absensiList);
     setNotulensiData(notulensiList);
+    setJadwalRapatData(jadwalList);
   };
+
+  const handleDeleteJadwal = async (id: string) => {
+    if (window.confirm('Yakin ingin menghapus jadwal ini?')) {
+      const success = await dataService.deleteJadwalRapat(id);
+      if (success) {
+        setMessage({ type: 'success', text: 'Jadwal berhasil dihapus' });
+        await loadAdminData();
+      } else {
+        setMessage({ type: 'error', text: 'Gagal menghapus jadwal' });
+      }
+    }
+  };
+
+  const handleCopyLink = (qrId: string) => {
+    const link = `${window.location.origin}/#/absensi-qr/${qrId}`;
+    navigator.clipboard.writeText(link);
+    setMessage({ type: 'success', text: 'Tautan presensi berhasil disalin!' });
+    setTimeout(() => setMessage({ type: '', text: '' }), 3000);
+  };
+
+  const openQRDialog = (j: JadwalRapat) => {
+    if (j.activeQRId) {
+      setSelectedQR({ id: j.activeQRId, judul: j.judul, jenis: j.jenisKegiatan || 'rapat' });
+      setShowQRDialog(true);
+    }
+  };
+
+  const handleQuickGenerateQR = async (j: JadwalRapat) => {
+    setMessage({ type: 'info', text: 'Sedang generate QR...' });
+    
+    // For manual generation from schedule:
+    // 1. If recurring, make it permanent
+    // 2. If single, set expiry to jamSelesai of that specific day
+    let expiresAt: string | undefined = (j.repeatType && j.repeatType !== 'none') ? 'unlimited' : undefined;
+    
+    if (j.repeatType === 'none' || !j.repeatType) {
+      const [endH, endM] = (j.jamSelesai || '00:00').split(':').map(Number);
+      const expDate = new Date(j.tanggal);
+      expDate.setHours(endH, endM, 0, 0);
+      expiresAt = expDate.toISOString();
+    }
+    
+    const result = await dataService.generateAbsensiQR(
+      j.jenisKegiatan || 'rapat',
+      j.judul,
+      expiresAt,
+      j.id
+    );
+
+    if (result.success) {
+      setMessage({ type: 'success', text: 'QR Code berhasil dibuat!' });
+      await loadAdminData();
+      if (result.id) {
+        setSelectedQR({ id: result.id, judul: j.judul, jenis: j.jenisKegiatan || 'rapat' });
+        setShowQRDialog(true);
+      }
+    } else {
+      setMessage({ type: 'error', text: result.message || 'Gagal generate QR' });
+    }
+    setTimeout(() => setMessage({ type: '', text: '' }), 3000);
+  };
+
+
+
+  const timOptions = ['Distribusi', 'ZI', 'PSS', 'POTIK', 'Produksi', 'Sosial', 'TU', 'Neraca'];
+  const dayNames = ['Min', 'Sen', 'Sel', 'Rab', 'Kam', 'Jum', 'Sab'];
 
   const handleUserSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -140,6 +224,7 @@ export default function AdminPanel() {
           nama: userForm.nama,
           email: userForm.email,
           kategori: userForm.kategori as UserKategori,
+          tim: userForm.tim,
           role: userForm.role as UserRole,
           ...(userForm.password && { password: userForm.password })
         });
@@ -148,15 +233,11 @@ export default function AdminPanel() {
           userForm.nama,
           userForm.email,
           userForm.password,
-          userForm.kategori as UserKategori
+          userForm.kategori as UserKategori,
+          userForm.tim,
+          'ADMIN', // bypass OTP
+          userForm.role as UserRole
         );
-        if (result.success && userForm.role === 'admin') {
-          const newUsers = await authService.getAllUsersForAdmin();
-          const newUser = newUsers.find(u => u.email === userForm.email);
-          if (newUser) {
-            await authService.updateUser(newUser.id, { role: 'admin' });
-          }
-        }
         success = result.success;
       }
 
@@ -183,6 +264,7 @@ export default function AdminPanel() {
       email: user.email,
       password: '',
       kategori: user.kategori,
+      tim: user.tim || '',
       role: user.role
     });
     setIsUserDialogOpen(true);
@@ -289,10 +371,10 @@ export default function AdminPanel() {
   };
 
   const handleDeleteAllAbsensi = async () => {
-    if (window.confirm('Yakin ingin menghapus SEMUA data absensi? Tindakan ini tidak dapat dibatalkan!')) {
-      const success = await dataService.deleteAllAbsensi();
+    if (window.confirm('Yakin ingin menghapus SEMUA data presensi? Tindakan ini tidak dapat dibatalkan!')) {
+      const success = await dataService.deleteAbsensi('all'); // Assuming deleteAbsensi('all') handles full deletion
       if (success) {
-        setMessage({ type: 'success', text: 'Semua data absensi berhasil dihapus!' });
+        setMessage({ type: 'success', text: 'Semua data presensi berhasil dihapus!' });
         await loadAdminData();
       } else {
         setMessage({ type: 'error', text: 'Gagal menghapus semua data absensi' });
@@ -301,10 +383,10 @@ export default function AdminPanel() {
   };
 
   const handleDeleteAllNotulensi = async () => {
-    if (window.confirm('Yakin ingin menghapus SEMUA data notulensi? Tindakan ini tidak dapat dibatalkan!')) {
-      const success = await dataService.deleteAllNotulensi();
+    if (window.confirm('Yakin ingin menghapus SEMUA data notula? Tindakan ini tidak dapat dibatalkan!')) {
+      const success = await dataService.deleteNotulensi('all'); // Assuming deleteNotulensi('all') handles full deletion
       if (success) {
-        setMessage({ type: 'success', text: 'Semua data notulensi berhasil dihapus!' });
+        setMessage({ type: 'success', text: 'Semua data notula berhasil dihapus!' });
         await loadAdminData();
       } else {
         setMessage({ type: 'error', text: 'Gagal menghapus semua data notulensi' });
@@ -325,7 +407,7 @@ export default function AdminPanel() {
   };
 
   const resetUserForm = () => {
-    setUserForm({ nama: '', email: '', password: '', kategori: '', role: '' });
+    setUserForm({ nama: '', email: '', password: '', kategori: '', tim: '', role: '' });
     setEditingUser(null);
     setMessage({ type: '', text: '' });
   };
@@ -411,21 +493,28 @@ export default function AdminPanel() {
     doc.setLineWidth(0.5);
     doc.line(14, 48, pageWidth - 14, 48);
     
+    doc.setFontSize(14);
+    doc.setFont('helvetica', 'bold');
+    doc.text('DAFTAR HADIR (PRESENSI)', pageWidth / 2, 56, { align: 'center' });
+
     doc.setFontSize(11);
     doc.setFont('helvetica', 'normal');
-    doc.text('Judul Kegiatan', 14, 58);
-    doc.text(`: ${exportForm.judulKegiatan}`, 60, 58);
-    doc.text('Hari/Tanggal', 14, 65);
-    doc.text(`: ${exportForm.hari}, ${exportForm.tanggal}`, 60, 65);
-    doc.text('Tempat', 14, 72);
-    doc.text(`: ${exportForm.tempat}`, 60, 72);
+    doc.text('Judul Kegiatan', 14, 65);
+    // Adjusted X to 45 so things align better horizontally
+    doc.text(`: ${exportForm.judulKegiatan}`, 45, 65);
+    doc.text('Hari/Tanggal', 14, 72);
+    doc.text(`: ${exportForm.hari}, ${exportForm.tanggal}`, 45, 72);
+    doc.text('Tempat', 14, 79);
+    doc.text(`: ${exportForm.tempat}`, 45, 79);
     
-    const startY = 82;
+    const startY = 88;
     doc.setFontSize(10);
     doc.setFont('helvetica', 'bold');
     
-    const colWidths = [10, 45, 25, 20, 50, 40];
-    const headers = ['No', 'Nama', 'Kategori', 'Waktu', 'Nama Kegiatan', 'TTD'];
+    // Adjusted widths to fit Page Width better (roughly ~180 usable width)
+    // No: 10, Nama: 50, Tim/Bagian: 40, Jabatan: 45, TTD: 35
+    const colWidths = [10, 50, 40, 45, 35];
+    const headers = ['No', 'Nama', 'Tim/Bagian', 'Jabatan', 'TTD'];
     let currentX = 14;
     
     headers.forEach((header, i) => {
@@ -444,7 +533,6 @@ export default function AdminPanel() {
       }
       
       const user = users.find(u => u.id === item.userId);
-      const kategori = item.isGuest ? 'Tamu' : (user?.kategori || 'N/A');
       const nama = item.isGuest && item.instansi ? `${item.namaUser} (${item.instansi})` : item.namaUser;
       
       currentX = 14;
@@ -459,33 +547,32 @@ export default function AdminPanel() {
       doc.rect(currentX, currentY, colWidths[1], rowHeight);
       doc.text(nama.substring(0, 25), currentX + 2, currentY + 8);
       currentX += colWidths[1];
-      
-      // Cell 3: Kategori
+
+      // Cell 3: Tim/Bagian
       doc.rect(currentX, currentY, colWidths[2], rowHeight);
-      doc.text(kategori, currentX + colWidths[2] / 2, currentY + 8, { align: 'center' });
+      const tim = item.isGuest ? '-' : (user?.tim || '-');
+      doc.text(tim.substring(0, 20), currentX + 2, currentY + 8);
       currentX += colWidths[2];
       
-      // Cell 4: Waktu Absen
+      // Cell 4: Jabatan
       doc.rect(currentX, currentY, colWidths[3], rowHeight);
-      doc.text(item.waktu, currentX + colWidths[3] / 2, currentY + 8, { align: 'center' });
+      // Fallback: If guest, write '-', else read Jabatan from User 
+      // (assuming user object has jabatan, if not fallback to '-')
+      const jabatan = item.isGuest ? '-' : (user?.jabatan || '-');
+      doc.text(jabatan.substring(0, 22), currentX + 2, currentY + 8);
       currentX += colWidths[3];
       
-      // Cell 5: Nama Kegiatan
+      // Cell 5: Tanda Tangan
       doc.rect(currentX, currentY, colWidths[4], rowHeight);
-      const namaKegiatan = item.namaKegiatan || '-';
-      doc.text(namaKegiatan.substring(0, 30), currentX + 2, currentY + 8);
-      currentX += colWidths[4];
-      
-      // Cell 6: Tanda Tangan
-      doc.rect(currentX, currentY, colWidths[5], rowHeight);
       if (item.signature) {
         try {
-          doc.addImage(item.signature, 'PNG', currentX + 2, currentY + 1, 20, 10);
+          // Centering the image in the cell
+          doc.addImage(item.signature, 'PNG', currentX + (colWidths[4] - 20) / 2, currentY + 1, 20, 10);
         } catch (e) {
-          doc.text('-', currentX + colWidths[5] / 2, currentY + 8, { align: 'center' });
+          doc.text('-', currentX + colWidths[4] / 2, currentY + 8, { align: 'center' });
         }
       } else {
-        doc.text('-', currentX + colWidths[5] / 2, currentY + 8, { align: 'center' });
+        doc.text('-', currentX + colWidths[4] / 2, currentY + 8, { align: 'center' });
       }
       
       currentY += rowHeight;
@@ -514,6 +601,7 @@ export default function AdminPanel() {
     const header = [
     'No', 
     'Nama', 
+    'Tim/Bagian',
     'Kategori', 
     'Jenis Kegiatan', 
     'Nama Kegiatan',
@@ -529,6 +617,7 @@ export default function AdminPanel() {
       return [
         index + 1,
         item.namaUser,
+        item.isGuest ? '-' : (user?.tim || '-'),
         kategori,
         item.jenisKegiatan.replace('-', ' ').toUpperCase(),
         item.namaKegiatan || '-',
@@ -539,7 +628,7 @@ export default function AdminPanel() {
     });
 
     const csvContent = [
-      `DAFTAR ABSENSI - BPS KOTA SURABAYA`,
+      `DAFTAR HADIR (PRESENSI) - BPS KOTA SURABAYA`,
       `Judul Kegiatan: ${exportForm.judulKegiatan}`,
       `Hari/Tanggal: ${exportForm.hari}, ${exportForm.tanggal}`,
       `Tempat: ${exportForm.tempat}`,
@@ -582,13 +671,19 @@ export default function AdminPanel() {
     URL.revokeObjectURL(url);
   };
 
+  const formatDateDisplay = (dateString: string) => {
+    try {
+      if (!dateString) return '';
+      const [year, month, day] = dateString.split('-');
+      return `${day}/${month}/${year}`;
+    } catch {
+      return dateString;
+    }
+  };
+
   const compareDates = (itemDate: string, filterDate: string): boolean => {
     if (!filterDate) return true;
-    
-    const [year, month, day] = filterDate.split('-');
-    const formattedFilterDate = `${day}/${month}/${year}`;
-    
-    return itemDate === formattedFilterDate;
+    return itemDate === filterDate;
   };
 
   const getFilteredAbsensi = () => {
@@ -607,10 +702,23 @@ export default function AdminPanel() {
           kategoriMatch = user?.kategori === filterKategori;
         }
       }
+
+      let timMatch = true;
+      if (filterTim !== 'all') {
+        if (item.isGuest) {
+          timMatch = false;
+        } else {
+          const user = users.find(u => u.id === item.userId);
+          timMatch = user?.tim === filterTim;
+        }
+      }
       
-      return dateMatch && userMatch && kegiatanMatch && kategoriMatch && namaKegiatanMatch;
+      return dateMatch && userMatch && kegiatanMatch && kategoriMatch && namaKegiatanMatch && timMatch;
     });
   };
+
+  // Unique nama kegiatan for auto-suggest
+  const uniqueNamaKegiatan = [...new Set(absensiData.map(a => a.namaKegiatan).filter(Boolean))];
 
   const filteredAbsensi = getFilteredAbsensi();
 
@@ -624,6 +732,7 @@ export default function AdminPanel() {
     { value: 'all', label: 'Semua Kegiatan' },
     { value: 'senam', label: '🏃‍♂️ Senam Pagi' },
     { value: 'apel', label: '🎖️ Apel Pagi' },
+    { value: 'sharing-knowledge', label: '🧠 Sharing Knowledge' },
     { value: 'rapelan', label: '📋 Rapelan' },
     { value: 'doa-bersama', label: '🤲 Doa Bersama' },
     { value: 'rapat', label: '📋 Rapat' }
@@ -655,10 +764,10 @@ export default function AdminPanel() {
 
   const stats = {
     totalUsers: users.length,
-    totalAbsensi: absensiData.length,
-    totalNotulensi: notulensiData.length,
+    totalPresensi: absensiData.length,
+    totalNotula: notulensiData.length,
     totalActivities: activities.length,
-    filteredAbsensi: filteredAbsensi.length
+    filteredPresensi: filteredAbsensi.length
   };
 
   return (
@@ -726,7 +835,7 @@ export default function AdminPanel() {
               </div>
             </CardHeader>
             <CardContent>
-              <div className="text-3xl font-bold text-green-900">{stats.totalAbsensi}</div>
+              <div className="text-3xl font-bold text-green-900">{stats.totalPresensi}</div>
               <p className="text-xs text-green-700 mt-1">Record absensi</p>
             </CardContent>
           </Card>
@@ -739,7 +848,7 @@ export default function AdminPanel() {
               </div>
             </CardHeader>
             <CardContent>
-              <div className="text-3xl font-bold text-purple-900">{stats.totalNotulensi}</div>
+              <div className="text-3xl font-bold text-purple-900">{stats.totalNotula}</div>
               <p className="text-xs text-purple-700 mt-1">Notulensi dibuat</p>
             </CardContent>
           </Card>
@@ -770,22 +879,26 @@ export default function AdminPanel() {
 
         {/* Main Tabs */}
         <Tabs defaultValue="users" className="w-full">
-          <TabsList className="grid w-full grid-cols-4 bg-white shadow-md rounded-xl p-1">
+          <TabsList className="grid w-full grid-cols-5 bg-white shadow-md rounded-xl p-1">
             <TabsTrigger value="users" className="rounded-lg data-[state=active]:bg-blue-600 data-[state=active]:text-white">
               <Users className="w-4 h-4 mr-2" />
               Kelola User
             </TabsTrigger>
             <TabsTrigger value="absensi" className="rounded-lg data-[state=active]:bg-green-600 data-[state=active]:text-white">
               <Calendar className="w-4 h-4 mr-2" />
-              Monitor Absensi
+              Monitor Presensi
             </TabsTrigger>
             <TabsTrigger value="notulensi" className="rounded-lg data-[state=active]:bg-purple-600 data-[state=active]:text-white">
               <FileText className="w-4 h-4 mr-2" />
-              Monitor Notulensi
+              Monitor Notula
+            </TabsTrigger>
+            <TabsTrigger value="jadwal" className="rounded-lg data-[state=active]:bg-teal-600 data-[state=active]:text-white">
+              <Clock className="w-4 h-4 mr-2" />
+              Jadwal Rapat
             </TabsTrigger>
             <TabsTrigger value="statistics" className="rounded-lg data-[state=active]:bg-orange-600 data-[state=active]:text-white">
               <BarChart3 className="w-4 h-4 mr-2" />
-              Statistik Sistem
+              Statistik
             </TabsTrigger>
           </TabsList>
 
@@ -865,6 +978,28 @@ export default function AdminPanel() {
                           </Select>
                         </div>
                         <div className="space-y-2">
+                          <Label htmlFor="tim">Tim / Bagian</Label>
+                          <Select 
+                            onValueChange={(value) => setUserForm({ ...userForm, tim: value })}
+                            value={userForm.tim}
+                          >
+                            <SelectTrigger className="border-gray-300">
+                              <SelectValue placeholder="Pilih Tim / Bagian" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="Distribusi">Distribusi</SelectItem>
+                              <SelectItem value="ZI">ZI</SelectItem>
+                              <SelectItem value="PSS">PSS</SelectItem>
+                              <SelectItem value="Humas">Humas</SelectItem>
+                              <SelectItem value="IPDS">IPDS</SelectItem>
+                              <SelectItem value="Sosial">Sosial</SelectItem>
+                              <SelectItem value="Produksi">Produksi</SelectItem>
+                              <SelectItem value="Neraca">Neraca</SelectItem>
+                              <SelectItem value="POTIK">POTIK</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div className="space-y-2">
                           <Label htmlFor="role">Role</Label>
                           <Select 
                             onValueChange={(value) => setUserForm({ ...userForm, role: value as UserRole })}
@@ -903,6 +1038,7 @@ export default function AdminPanel() {
                       <TableRow className="bg-gray-50">
                         <TableHead className="font-semibold">Nama</TableHead>
                         <TableHead className="font-semibold">Email</TableHead>
+                        <TableHead className="font-semibold">Tim/Bagian</TableHead>
                         <TableHead className="font-semibold">Kategori</TableHead>
                         <TableHead className="font-semibold">Role</TableHead>
                         <TableHead className="font-semibold">Status</TableHead>
@@ -915,6 +1051,7 @@ export default function AdminPanel() {
                         <TableRow key={user.id} className="hover:bg-gray-50">
                           <TableCell className="font-medium">{user.nama}</TableCell>
                           <TableCell className="text-gray-600">{user.email}</TableCell>
+                          <TableCell className="text-gray-600 font-medium">{user.tim || '-'}</TableCell>
                           <TableCell>
                             <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200">
                               {user.kategori}
@@ -1135,14 +1272,48 @@ export default function AdminPanel() {
                         </DialogHeader>
                         <form onSubmit={handleExportSubmit} className="space-y-4">
                           <div className="space-y-2">
+                            <Label>Pilih Jadwal Kegiatan <span className="text-red-500">*</span></Label>
+                            <Select 
+                              onValueChange={(jadwalId) => {
+                                const jadwal = jadwalRapatData.find(j => j.id === jadwalId);
+                                if (jadwal) {
+                                  // Determine day of the week from the date
+                                  const dateObj = new Date(jadwal.tanggal);
+                                  const hari = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'][dateObj.getDay()];
+                                  
+                                  setExportForm({
+                                    ...exportForm,
+                                    judulKegiatan: jadwal.judul,
+                                    tanggal: jadwal.tanggal,
+                                    hari: hari,
+                                    // Use 'BPS Kota Surabaya' as default tempat if none is specified
+                                    tempat: 'BPS Kota Surabaya' 
+                                  });
+                                }
+                              }}
+                            >
+                              <SelectTrigger className="border-gray-300">
+                                <SelectValue placeholder="-- Pilih dari Jadwal --" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {jadwalRapatData.sort((a,b) => new Date(b.tanggal).getTime() - new Date(a.tanggal).getTime()).map(jadwal => (
+                                  <SelectItem key={jadwal.id} value={jadwal.id}>
+                                    {jadwal.tanggal} - {jadwal.judul}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                            <p className="text-xs text-slate-500 mt-1">Pilih jadwal untuk mengisi form otomatis di bawah ini.</p>
+                          </div>
+
+                          <div className="space-y-2">
                             <Label htmlFor="judulKegiatan">Judul Kegiatan <span className="text-red-500">*</span></Label>
                             <Input
                               id="judulKegiatan"
-                              placeholder="Contoh: Apel Pagi Pegawai BPS Kota Surabaya"
+                              placeholder="Pilih dari dropdown di atas"
                               value={exportForm.judulKegiatan}
-                              onChange={(e) => setExportForm({ ...exportForm, judulKegiatan: e.target.value })}
-                              required
-                              className="border-gray-300"
+                              readOnly
+                              className="bg-slate-100 border-gray-300 text-slate-600 cursor-not-allowed"
                             />
                           </div>
                           <div className="grid grid-cols-2 gap-4">
@@ -1150,11 +1321,10 @@ export default function AdminPanel() {
                               <Label htmlFor="hari">Hari <span className="text-red-500">*</span></Label>
                               <Input
                                 id="hari"
-                                placeholder="Contoh: Senin"
+                                placeholder="Otomatis"
                                 value={exportForm.hari}
-                                onChange={(e) => setExportForm({ ...exportForm, hari: e.target.value })}
-                                required
-                                className="border-gray-300"
+                                readOnly
+                                className="bg-slate-100 border-gray-300 text-slate-600 cursor-not-allowed"
                               />
                             </div>
                             <div className="space-y-2">
@@ -1163,9 +1333,8 @@ export default function AdminPanel() {
                                 id="tanggal"
                                 type="date"
                                 value={exportForm.tanggal}
-                                onChange={(e) => setExportForm({ ...exportForm, tanggal: e.target.value })}
-                                required
-                                className="border-gray-300"
+                                readOnly
+                                className="bg-slate-100 border-gray-300 text-slate-600 cursor-not-allowed"
                               />
                             </div>
                           </div>
@@ -1175,9 +1344,8 @@ export default function AdminPanel() {
                               id="tempat"
                               placeholder="Contoh: Aula BPS Kota Surabaya"
                               value={exportForm.tempat}
-                              onChange={(e) => setExportForm({ ...exportForm, tempat: e.target.value })}
-                              required
-                              className="border-gray-300"
+                              readOnly
+                              className="bg-slate-100 border-gray-300 text-slate-600 cursor-not-allowed"
                             />
                           </div>
                           <div className="space-y-2">
@@ -1342,14 +1510,32 @@ export default function AdminPanel() {
                     </Select>
                   </div>
                   <div className="space-y-2">
+                    <Label className="text-gray-700">Tim</Label>
+                    <Select onValueChange={setFilterTim} value={filterTim}>
+                      <SelectTrigger className="border-gray-300">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">Semua Tim</SelectItem>
+                        {timOptions.map(t => (
+                          <SelectItem key={t} value={t}>{t}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
                     <Label className="text-gray-700">Nama Kegiatan</Label>
-                    <Input
-                      type="text"
-                      placeholder="Cari nama kegiatan..."
-                      value={filterNamaKegiatan}
-                      onChange={(e) => setFilterNamaKegiatan(e.target.value)}
-                      className="border-gray-300"
-                    />
+                    <Select onValueChange={(v) => setFilterNamaKegiatan(v === 'all' ? '' : v)} value={filterNamaKegiatan || 'all'}>
+                      <SelectTrigger className="border-gray-300">
+                        <SelectValue placeholder="Pilih kegiatan" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">Semua Kegiatan</SelectItem>
+                        {uniqueNamaKegiatan.map(nama => (
+                          <SelectItem key={nama} value={nama}>{nama}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                   </div>
                 </div>
                 <div className="mt-4 flex items-center justify-between">
@@ -1365,6 +1551,7 @@ export default function AdminPanel() {
                       setFilterKategori('all');
                       setFilterUser('');
                       setFilterNamaKegiatan('');
+                      setFilterTim('all');
                     }}
                     className="hover:bg-gray-100"
                   >
@@ -1402,7 +1589,7 @@ export default function AdminPanel() {
                           return (
                             <TableRow key={item.id} className="hover:bg-gray-50">
                               <TableCell className="font-medium">{index + 1}</TableCell>
-                              <TableCell className="text-gray-600">{item.tanggal}</TableCell>
+                              <TableCell className="text-gray-600">{formatDateDisplay(item.tanggal)}</TableCell>
                               <TableCell className="text-gray-600">{item.waktu}</TableCell>
                               <TableCell>
                                 <div>
@@ -1476,6 +1663,145 @@ export default function AdminPanel() {
             </Card>
           </TabsContent>
 
+          {/* Jadwal Rapat Tab */}
+          <TabsContent value="jadwal" className="space-y-4 mt-6">
+            <Card className="border-0 shadow-lg">
+              <CardHeader className="bg-gradient-to-r from-teal-50 to-cyan-50 border-b">
+                <div className="flex justify-between items-center">
+                  <div>
+                    <CardTitle className="text-xl text-teal-900">Monitor Jadwal Kegiatan</CardTitle>
+                    <CardDescription className="text-teal-700">Manajemen jadwal yang sedang aktif atau akan datang</CardDescription>
+                  </div>
+                </div>
+              </CardHeader>
+              <CardContent className="p-0">
+                <div className="overflow-x-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow className="bg-gray-50">
+                        <TableHead className="font-semibold">No</TableHead>
+                        <TableHead className="font-semibold">Judul</TableHead>
+                        <TableHead className="font-semibold">Jenis</TableHead>
+                        <TableHead className="font-semibold">Tanggal</TableHead>
+                        <TableHead className="font-semibold">Jam</TableHead>
+                        <TableHead className="font-semibold">Tim</TableHead>
+                        <TableHead className="font-semibold">Peserta</TableHead>
+                        <TableHead className="font-semibold">Repeat</TableHead>
+                        <TableHead className="font-semibold">Tautan / QR</TableHead>
+                        <TableHead className="font-semibold text-center">Aksi</TableHead>
+
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {jadwalRapatData.length > 0 ? (
+                        jadwalRapatData.map((j, idx) => (
+                          <TableRow key={j.id} className="hover:bg-gray-50">
+                            <TableCell className="font-medium">{idx + 1}</TableCell>
+                            <TableCell>
+                              <div>
+                                <p className="font-semibold text-gray-900">{j.judul}</p>
+                                {j.deskripsi && <p className="text-xs text-gray-500 truncate max-w-[200px]">{j.deskripsi}</p>}
+                              </div>
+                            </TableCell>
+                            <TableCell>
+                              <Badge variant="secondary" className="bg-blue-50 text-blue-700 border-blue-200 uppercase text-[10px]">
+                                {j.jenisKegiatan?.replace('-', ' ') || 'Rapat'}
+                              </Badge>
+                            </TableCell>
+                            <TableCell className="text-gray-600">{formatDateDisplay(j.tanggal)}</TableCell>
+                            <TableCell className="text-gray-600">{j.jamMulai} - {j.jamSelesai}</TableCell>
+                            <TableCell>
+                              <div className="flex flex-wrap gap-1">
+                                {(Array.isArray(j.tim) ? j.tim : []).map(t => (
+                                  <Badge key={t} variant="outline" className="text-[10px]">{t}</Badge>
+                                ))}
+                              </div>
+                            </TableCell>
+                            <TableCell>
+                              <div className="flex flex-wrap gap-1">
+                                {(Array.isArray(j.peserta) ? j.peserta : []).map(p => (
+                                  <Badge key={p} className="bg-blue-100 text-blue-700 border-0 text-[10px]">{p}</Badge>
+                                ))}
+                              </div>
+                            </TableCell>
+                            <TableCell>
+                              <Badge variant="outline" className="text-[10px]">
+                                {j.repeatType === 'none' ? '1x' : j.repeatType === 'daily' ? 'Harian' : j.repeatType === 'weekly' ? 'Mingguan' : 'Custom'}
+                              </Badge>
+                            </TableCell>
+                            <TableCell>
+                              {j.activeQRId ? (
+                                <div className="flex gap-2">
+                                  <Button 
+                                    size="sm" 
+                                    variant="outline" 
+                                    className="h-8 w-8 p-0 border-indigo-200 text-indigo-600 hover:bg-indigo-50"
+                                    onClick={() => openQRDialog(j)}
+                                    title="Lihat QR Code"
+                                  >
+                                    <QrCode className="w-4 h-4" />
+                                  </Button>
+                                  <Button 
+                                    size="sm" 
+                                    variant="outline" 
+                                    className="h-8 w-8 p-0 border-blue-200 text-blue-600 hover:bg-blue-50"
+                                    onClick={() => handleCopyLink(j.activeQRId!)}
+                                    title="Salin Tautan"
+                                  >
+                                    <Link className="w-4 h-4" />
+                                  </Button>
+                                </div>
+                              ) : (() => {
+                                const now = new Date();
+                                const jDate = new Date(j.tanggal);
+                                const [endH, endM] = (j.jamSelesai || '00:00').split(':').map(Number);
+                                jDate.setHours(endH, endM, 0, 0);
+                                const isFinished = j.repeatType === 'none' && now > jDate;
+
+                                return (
+                                  <Button
+                                    size="sm"
+                                    className={`${isFinished ? 'bg-gray-400 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700'} h-8 text-[10px] gap-1 px-2`}
+                                    onClick={() => !isFinished && handleQuickGenerateQR(j)}
+                                    disabled={isFinished}
+                                    title={isFinished ? "Kegiatan sudah berakhir" : "Generate QR"}
+                                  >
+                                    {isFinished ? <Clock className="w-3 h-3" /> : <Plus className="w-3 h-3" />}
+                                    {isFinished ? 'Selesai' : 'Generate'}
+                                  </Button>
+                                );
+                              })()}
+                            </TableCell>
+
+
+                            <TableCell>
+                              <div className="flex justify-center">
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  onClick={() => handleDeleteJadwal(j.id)}
+                                  className="hover:bg-red-50 hover:text-red-700"
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                </Button>
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        ))
+                      ) : (
+                        <TableRow>
+                          <TableCell colSpan={8} className="text-center py-8 text-gray-500">
+                            Belum ada jadwal rapat. Klik "Buat Jadwal" untuk membuat.
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </TableBody>
+                  </Table>
+                </div>
+              </CardContent>
+            </Card>
+          </TabsContent>
+
           {/* Notulensi jtoring Tab */}
           <TabsContent value="notulensi" className="space-y-4 mt-6">
             <Card className="border-0 shadow-lg">
@@ -1520,7 +1846,7 @@ export default function AdminPanel() {
                       {notulensiData.length > 0 ? (
                         notulensiData.map((item) => (
                           <TableRow key={item.id} className="hover:bg-gray-50">
-                            <TableCell className="text-gray-600">{item.tanggal}</TableCell>
+                            <TableCell className="text-gray-600">{formatDateDisplay(item.tanggal)}</TableCell>
                             <TableCell className="text-gray-600">{item.waktu}</TableCell>
                             <TableCell className="font-medium max-w-xs truncate">
                               {item.judul}
@@ -1629,7 +1955,7 @@ export default function AdminPanel() {
                     <CardContent className="space-y-3">
                       <div className="flex justify-between items-center p-3 bg-white rounded-lg">
                         <span className="text-sm text-gray-700">Total Record</span>
-                        <span className="text-xl font-bold text-green-600">{stats.totalAbsensi}</span>
+                        <span className="text-xl font-bold text-green-600">{stats.totalPresensi}</span>
                       </div>
                       <div className="flex justify-between items-center p-3 bg-white rounded-lg">
                         <span className="text-sm text-gray-700">Pegawai</span>
@@ -1669,7 +1995,7 @@ export default function AdminPanel() {
                     <CardContent className="space-y-3">
                       <div className="flex justify-between items-center p-3 bg-white rounded-lg">
                         <span className="text-sm text-gray-700">Total Dokumen</span>
-                        <span className="text-xl font-bold text-purple-600">{stats.totalNotulensi}</span>
+                        <span className="text-xl font-bold text-purple-600">{stats.totalNotula}</span>
                       </div>
                       <div className="flex justify-between items-center p-3 bg-white rounded-lg">
                         <span className="text-sm text-gray-700">Rapat</span>
@@ -1773,6 +2099,67 @@ export default function AdminPanel() {
           </TabsContent>
         </Tabs>
       </div>
+
+      {/* QR Code Dialog for Admin Monitoring */}
+      <Dialog open={showQRDialog} onOpenChange={setShowQRDialog}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-xl font-bold text-indigo-900 flex items-center gap-2">
+              <QrCode className="w-6 h-6 text-indigo-600" />
+              Tautan Presensi Kegiatan
+            </DialogTitle>
+            <DialogDescription>
+              Scan QR ini atau bagikan link untuk melakukan presensi.
+            </DialogDescription>
+          </DialogHeader>
+          
+          {selectedQR && (
+            <div className="flex flex-col items-center justify-center p-6 space-y-6">
+              <div className="text-center">
+                <Badge className="mb-2 bg-indigo-100 text-indigo-700 hover:bg-indigo-100 border-indigo-200">
+                  {selectedQR.jenis.toUpperCase()}
+                </Badge>
+                <h3 className="text-lg font-bold text-gray-900">{selectedQR.judul}</h3>
+              </div>
+
+              <div className="p-4 bg-white border-4 border-indigo-100 rounded-2xl shadow-inner">
+                <QRCode 
+                  value={`${window.location.origin}/#/absensi-qr/${selectedQR.id}`}
+                  size={200}
+                  level="H"
+                />
+              </div>
+
+              <div className="w-full space-y-2">
+                <Label className="text-xs text-gray-500">Tautan Langsung</Label>
+                <div className="flex gap-2">
+                  <Input 
+                    readOnly 
+                    value={`${window.location.origin}/#/absensi-qr/${selectedQR.id}`} 
+                    className="bg-gray-50 text-xs"
+                  />
+                  <Button 
+                    variant="outline"
+                    onClick={() => handleCopyLink(selectedQR.id)}
+                  >
+                    <Copy className="w-4 h-4" />
+                  </Button>
+                </div>
+              </div>
+
+              <Button 
+                className="w-full bg-indigo-600 hover:bg-indigo-700"
+                onClick={() => {
+                  window.open(`/#/absensi-qr/${selectedQR.id}`, '_blank');
+                }}
+              >
+                <ExternalLink className="w-4 h-4 mr-2" />
+                Buka Halaman Presensi
+              </Button>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

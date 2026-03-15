@@ -6,7 +6,8 @@ export interface User {
   email: string;
   password?: string;
   kategori: 'Pegawai' | 'Magang';
-  role: 'user' | 'admin';
+  tim?: string;
+  role: 'user' | 'admin' | 'tamu';
   tanggalDaftar: string;
   isBlocked?: boolean;
   blockReason?: 'izin' | 'sakit' | 'alpa' | 'izin-telat';
@@ -29,7 +30,8 @@ class AuthService {
 
   constructor() {
     this.loadCurrentUser();
-    this.ensureAdminExists();
+    // Memanggil ensureAdminExists secara async tanpa await agar constructor selesai cepat
+    this.ensureAdminExists().catch(err => console.error('Initial admin check failed:', err));
   }
 
   private loadCurrentUser() {
@@ -54,16 +56,42 @@ class AuthService {
     nama: string,
     email: string,
     password: string,
-    kategori: 'Pegawai' | 'Magang'
+    kategori: 'Pegawai' | 'Magang',
+    tim: string,
+    otp: string
   ): Promise<{ success: boolean; message: string }> {
     try {
       const result = await apiClient.post<{ success: boolean; message: string }>(
         '/auth/register',
-        { nama, email, password, kategori }
+        { nama, email, password, kategori, tim, otp }
       );
       return result;
     } catch (error: any) {
       return { success: false, message: error.message || 'Registrasi gagal' };
+    }
+  }
+
+  async sendOtp(email: string): Promise<{ success: boolean; message: string; expiresAt?: string }> {
+    try {
+      const result = await apiClient.post<{ success: boolean; message: string; expiresAt?: string }>(
+        '/auth/send-otp',
+        { email }
+      );
+      return result;
+    } catch (error: any) {
+      return { success: false, message: error.message || 'Gagal mengirim OTP' };
+    }
+  }
+
+  async verifyOtp(email: string, otp: string): Promise<{ success: boolean; message: string }> {
+    try {
+      const result = await apiClient.post<{ success: boolean; message: string }>(
+        '/auth/verify-otp',
+        { email, otp }
+      );
+      return result;
+    } catch (error: any) {
+      return { success: false, message: error.message || 'Verifikasi OTP gagal' };
     }
   }
 
@@ -245,6 +273,7 @@ class AuthService {
       { value: 'senam', label: 'Senam Pagi', icon: '🏃‍♂️' },
       { value: 'apel', label: 'Apel Pagi', icon: '🎖️' },
       { value: 'rapat', label: 'Rapat', icon: '💼' },
+      { value: 'sharing-knowledge', label: 'Sharing Knowledge', icon: '🧠' },
       { value: 'rapelan', label: 'Rapelan', icon: '📋' },
       { value: 'doa-bersama', label: 'Doa Bersama', icon: '🤲' }
     ];
@@ -258,4 +287,3 @@ class AuthService {
 }
 
 export const authService = new AuthService();
-
