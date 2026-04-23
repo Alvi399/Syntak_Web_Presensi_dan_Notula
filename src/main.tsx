@@ -9,7 +9,8 @@
  * Patch ini menangkap error tersebut dan mem-fallback dengan aman.
  * Ref: https://github.com/facebook/react/issues/17256
  */
-if (typeof Node !== 'undefined' && Node.prototype) {
+// DOM Patch to prevent crash from browser extensions
+if (typeof window !== 'undefined' && typeof Node !== 'undefined' && Node.prototype) {
   const originalRemoveChild = Node.prototype.removeChild;
   Node.prototype.removeChild = function <T extends Node>(child: T): T {
     if (child.parentNode !== this) {

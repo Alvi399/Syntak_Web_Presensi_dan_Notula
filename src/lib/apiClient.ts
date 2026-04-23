@@ -25,7 +25,15 @@ class ApiClient {
   }
 
   async get<T>(endpoint: string): Promise<T> {
-    return this.request<T>(endpoint, { method: 'GET' });
+    const separator = endpoint.includes('?') ? '&' : '?';
+    const cacheBuster = `_t=${Date.now()}`;
+    return this.request<T>(`${endpoint}${separator}${cacheBuster}`, { 
+      method: 'GET',
+      headers: {
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache'
+      }
+    });
   }
 
   async post<T>(endpoint: string, data?: any): Promise<T> {

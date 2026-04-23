@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { useDataSync } from '@/hooks/useDataSync';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
@@ -64,7 +65,7 @@ export default function Presensi() {
   const [magangUsers, setMagangUsers] = useState<any[]>([]);
   const [pegawaiUsers, setPegawaiUsers] = useState<any[]>([]);
 
-  const timOptions = ['Distribusi', 'ZI', 'PSS', 'POTIK', 'Produksi', 'Sosial', 'TU', 'Neraca'];
+  const timOptions = ['Distribusi', 'ZI', 'PSS', 'POTIK', 'Produksi', 'Sosial', 'TU', 'Neraca','Humas','IPDS','Umum','UKK'];
   const dayNames = ['Min', 'Sen', 'Sel', 'Rab', 'Kam', 'Jum', 'Sab'];
   
   const currentUser = authService.getCurrentUser();
@@ -84,6 +85,18 @@ export default function Presensi() {
       }
     }
   }, [currentUser]);
+
+  useDataSync(['all'], () => {
+    loadTodayData();
+    loadHistoryData();
+    loadActiveJadwal();
+    if (currentUser) {
+      checkUserBlockStatus();
+      if (currentUser.role === 'admin') {
+        checkActiveQR();
+      }
+    }
+  });
 
   useEffect(() => {
     loadHistoryData();

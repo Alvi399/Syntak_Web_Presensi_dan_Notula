@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { useDataSync } from '@/hooks/useDataSync';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -33,6 +34,11 @@ export default function Undangan() {
     loadUndangan();
     loadActiveJadwal();
   }, []);
+
+  useDataSync(['all'], () => {
+    loadUndangan();
+    loadActiveJadwal();
+  });
 
   const loadActiveJadwal = async () => {
     try {
@@ -108,11 +114,43 @@ export default function Undangan() {
         reader.readAsDataURL(uploadFile);
       });
 
+      // Optimistic insert: tambahkan item sementara ke list segera, lalu tutup dialog
+      const now = new Date();
+      const tempItem: UndanganRecord = {
+        id: `temp-${now.getTime()}`,
+        userId: currentUser?.id || '',
+        namaUser: currentUser?.nama || '',
+        tempat: 'Surabaya',
+        tanggal: now.toISOString().split('T')[0],
+        nomorSurat: '-',
+        sifat: 'Biasa',
+        lampiran: uploadFile.name,
+        perihal,
+        kepada: 'File undangan eksternal',
+        isiSurat: `File undangan yang diunggah: ${uploadFile.name}`,
+        hariTanggalWaktu: selectedJadwal ? `${selectedJadwal.tanggal}, ${selectedJadwal.jamMulai} - ${selectedJadwal.jamSelesai}` : '-',
+        tempatKegiatan: '-',
+        idKegiatan: selectedJadwalId || undefined,
+        tandaTangan: '',
+        jabatanPenandatangan: currentUser?.nama || '',
+        nip: '',
+        isUploadedFile: true,
+        uploadedFileName: uploadFile.name,
+        uploadedFileType: uploadFile.type,
+        uploadedFileData: fileData,
+        uploadedFileSize: uploadFile.size,
+        createdAt: now.toISOString(),
+      };
+      setUndanganList(prev => [tempItem, ...prev]);
+      resetUploadForm();
+      setIsUploadDialogOpen(false);
+
+      // Save ke server di background
       const success = await dataService.saveUndangan({
         userId: currentUser?.id || '',
         namaUser: currentUser?.nama || '',
         tempat: 'Surabaya',
-        tanggal: new Date().toISOString().split('T')[0],
+        tanggal: now.toISOString().split('T')[0],
         nomorSurat: '-',
         sifat: 'Biasa',
         lampiran: uploadFile.name,
@@ -134,15 +172,17 @@ export default function Undangan() {
 
       if (success) {
         setMessage({ type: 'success', text: 'File undangan berhasil diunggah!' });
-        resetUploadForm();
-        await loadUndangan();
-        setIsUploadDialogOpen(false);
+        // Refresh dari server untuk replace temp item dengan data asli
+        loadUndangan();
       } else {
         setMessage({ type: 'error', text: 'Gagal mengunggah file. Silakan coba lagi.' });
+        // Rollback: hapus temp item
+        loadUndangan();
       }
     } catch (error) {
       console.error('Upload error:', error);
       setMessage({ type: 'error', text: 'Terjadi kesalahan saat mengunggah file.' });
+      loadUndangan();
     } finally {
       setIsSubmitting(false);
     }
@@ -183,18 +223,26 @@ export default function Undangan() {
 
   const handleDelete = async (id: string) => {
     try {
-      if (window.confirm("Apakah Anda yakin ingin menghapus surat undangan ini?")) {
+      if (window.confirm('Apakah Anda yakin ingin menghapus surat undangan ini?')) {
+        // Optimistic update: backup and remove locally
+        const previousData = [...undanganList];
+        setUndanganList(prev => prev.filter(u => u.id !== id));
+        
         const success = await dataService.deleteUndangan(id);
         if (success) {
           setMessage({ type: 'success', text: 'Undangan berhasil dihapus!' });
-          await loadUndangan();
+          // Re-verify with server after a short delay to ensure DB consistency
+          setTimeout(() => loadUndangan(), 500);
         } else {
           setMessage({ type: 'error', text: 'Gagal menghapus undangan' });
+          // Rollback: restore from backup
+          setUndanganList(previousData);
         }
       }
     } catch (error) {
-      console.error("Error deleting undangan:", error);
+      console.error('Error deleting undangan:', error);
       setMessage({ type: 'error', text: 'Terjadi kesalahan saat menghapus undangan.' });
+      loadUndangan(); // Hard refresh on error
     }
   };
 

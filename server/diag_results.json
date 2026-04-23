@@ -1,33 +1,22 @@
-{
-  "absensi": [
-    {
-      "id": "2695956b-9a7f-4088-9104-dc0306894e4a",
-      "user_id": "09e7888b-5b7e-4113-aead-900a7c216b2d",
-      "nama_user": "Muhammad Alvi Kirana Zulfan Nazal",
-      "tanggal": "2026-02-23T17:00:00.000Z",
-      "is_guest": 0
-    }
-  ],
-  "users": [
-    {
-      "id": "09e7888b-5b7e-4113-aead-900a7c216b2d",
-      "nama": "Muhammad Alvi Kirana Zulfan Nazal",
-      "email": "muhammadalvi.23339@mhs.unesa.ac.id"
-    },
-    {
-      "id": "98026050-e88a-4ea2-a7c5-4e81097bb2ee",
-      "nama": "Muhammad Alvi Kirana Zulfan Nazal",
-      "email": "muhammadnurul.23190@mhs.unesa.ac.id"
-    },
-    {
-      "id": "e1180a6d-d5cc-11f0-a035-784561ec85a4",
-      "nama": "Administrator",
-      "email": "admin@absensi.com"
-    },
-    {
-      "id": "ec6e766b-4491-46fd-a19e-47ccf292254a",
-      "nama": "Mohammed Firaz Rajief Bismaka",
-      "email": "firaz@gmail.com"
-    }
-  ]
-}
+[
+  "481: await pool.execute('DELETE FROM otps WHERE email = ?', [email]);",
+  "587: await pool.execute('DELETE FROM otps WHERE email = ?', [email]);",
+  "845: app.delete('/api/auth/users/:id', async (req, res) => {",
+  "848: const [result] = await executeWithRetry('DELETE FROM users WHERE id = ?', [id]);",
+  "934: app.delete('/api/auth/activities/:id', async (req, res) => {",
+  "937: await pool.execute('DELETE FROM activity_logs WHERE id = ?', [id]);",
+  "946: app.delete('/api/auth/activities', async (req, res) => {",
+  "948: await pool.execute('DELETE FROM activity_logs');",
+  "1175: app.delete('/api/absensi/:id', async (req, res) => {",
+  "1178: await pool.execute('DELETE FROM absensi WHERE id = ?', [id]);",
+  "1187: app.delete('/api/absensi', async (req, res) => {",
+  "1189: await pool.execute('DELETE FROM absensi');",
+  "1355: app.delete('/api/notulensi/:id', async (req, res) => {",
+  "1358: await pool.execute('DELETE FROM notulensi WHERE id = ?', [id]);",
+  "1367: app.delete('/api/notulensi', async (req, res) => {",
+  "1369: await pool.execute('DELETE FROM notulensi');",
+  "1529: app.delete('/api/undangan/:id', async (req, res) => {",
+  "1532: await pool.execute('DELETE FROM undangan WHERE id = ?', [id]);",
+  "2452: app.delete('/api/jadwal-rapat/:id', async (req, res) => {",
+  "2455: await pool.execute('DELETE FROM jadwal_rapat WHERE id = ?', [id]);"
+]

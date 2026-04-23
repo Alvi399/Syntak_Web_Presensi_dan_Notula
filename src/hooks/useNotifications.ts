@@ -36,13 +36,13 @@ export function useNotifications() {
   const [broadcastProgress, setBroadcastProgress] = useState<BroadcastProgress>(INITIAL_PROGRESS);
   const [unreadCount, setUnreadCount] = useState(0);
   const esRef = useRef<EventSource | null>(null);
-  const currentUser = authService.getCurrentUser();
 
   const computeUnread = (list: AppNotification[]) =>
     list.filter(n => !n.isRead).length;
 
   // Load existing notifications from DB
   const loadNotifications = useCallback(async () => {
+    const currentUser = authService.getCurrentUser();
     if (!currentUser) return;
     try {
       const data = await apiClient.get<AppNotification[]>(`/notifications?userId=${currentUser.id}`);
@@ -51,7 +51,7 @@ export function useNotifications() {
     } catch {
       // silent
     }
-  }, [currentUser?.id]);
+  }, []);
 
   // Mark a single notification as read
   const markRead = useCallback(async (notifId: string) => {
@@ -66,6 +66,7 @@ export function useNotifications() {
 
   // Mark all as read
   const markAllRead = useCallback(async () => {
+    const currentUser = authService.getCurrentUser();
     if (!currentUser) return;
     try {
       await apiClient.put('/notifications/read-all', { userId: currentUser.id });
@@ -74,10 +75,11 @@ export function useNotifications() {
     } catch {
       // silent
     }
-  }, [currentUser?.id]);
+  }, []);
 
   // Subscribe to SSE
   useEffect(() => {
+    const currentUser = authService.getCurrentUser();
     if (!currentUser) return;
 
     loadNotifications();
@@ -134,11 +136,26 @@ export function useNotifications() {
       setBroadcastProgress(INITIAL_PROGRESS);
     });
 
+    // Data update event — dikirim backend setelah setiap CRUD berhasil
+    // Dispatch ke window agar halaman mana pun bisa subscribe tanpa prop drilling
+    es.addEventListener('data_update', (e) => {
+      try {
+        const detail = JSON.parse(e.data);
+        console.log('[SSE] Data update received:', detail);
+        // Dispatch original type
+        window.dispatchEvent(new CustomEvent('syntak:data_update', { detail }));
+        // Also dispatch a global 'all' update to be absolutely sure all components refresh
+        window.dispatchEvent(new CustomEvent('syntak:data_update', { detail: { type: 'all' } }));
+      } catch {}
+    });
+
     return () => {
-      es.close();
+      if (esRef.current) {
+        esRef.current.close();
+      }
       esRef.current = null;
     };
-  }, [currentUser?.id]);
+  }, []);
 
   return {
     notifications,

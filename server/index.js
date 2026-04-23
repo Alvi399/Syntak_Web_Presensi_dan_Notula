@@ -15,14 +15,49 @@ const __dirname = dirname(__filename);
 
 dotenv.config({ path: join(__dirname, '.env') });
 
-// Helper to format date in local timezone (YYYY-MM-DD)
+// ============================================
+// Timezone Helpers — WIB (UTC+7)
+// ============================================
+
+// Mengembalikan objek Date dimana nilai UTC-nya = waktu WIB saat ini
+// getNowWIB().getUTCHours() === jam WIB saat ini
+function getNowWIB() {
+  const WIB_OFFSET_MS = 7 * 60 * 60 * 1000;
+  return new Date(Date.now() + WIB_OFFSET_MS);
+}
+
+// Format tanggal ke 'YYYY-MM-DD':
+// - String 'YYYY-MM-DD...' → ambil 10 karakter pertama
+// - Date dari getNowWIB() → gunakan getUTC* (karena UTC fields = WIB)
+// - Date object biasa (dari new Date(isoString)) → getLocal* sudah benar di server Hostinger
 function formatDateLocal(dateInput) {
   if (!dateInput) return null;
-  const d = new Date(dateInput);
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+  // String: ambil 10 karakter pertama (YYYY-MM-DD)
+  if (typeof dateInput === 'string') {
+    const clean = dateInput.trim();
+    if (/^\d{4}-\d{2}-\d{2}/.test(clean)) return clean.substring(0, 10);
+    return null;
+  }
+  // Date object
+  if (dateInput instanceof Date) {
+    if (isNaN(dateInput.getTime())) return null;
+    // Gunakan UTC fields — getNowWIB() dan mysql2 DATE dengan timezone=+07:00
+    // keduanya sudah menempatkan WIB time di UTC fields
+    const year = dateInput.getUTCFullYear();
+    const month = String(dateInput.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(dateInput.getUTCDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }
+  return null;
+}
+
+// Format waktu 'HH:MM:SS' dari Date yang dihasilkan getNowWIB()
+// Gunakan getUTC* karena getNowWIB() menempatkan WIB time di UTC fields
+function formatTimeWIB(dateObj) {
+  const hh = String(dateObj.getUTCHours()).padStart(2, '0');
+  const mm = String(dateObj.getUTCMinutes()).padStart(2, '0');
+  const ss = String(dateObj.getUTCSeconds()).padStart(2, '0');
+  return `${hh}:${mm}:${ss}`;
 }
 
 const app = express();
@@ -31,7 +66,63 @@ const PORT = process.env.PORT || 3001;
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
+
+// Prevent Caching Global Middleware
+app.use((req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  next();
+});
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+// ============================================
+// REQUEST / RESPONSE LOGGER MIDDLEWARE
+// ============================================
+app.use((req, res, next) => {
+  const startMs = Date.now();
+
+  // Timestamp WIB
+  const wibNow = new Date(Date.now() + 7 * 3600 * 1000);
+  const ts = wibNow.toISOString().replace('T', ' ').substring(0, 19) + ' WIB';
+
+  // Sanitasi body — sembunyikan password/otp
+  const safeBody = req.body ? { ...req.body } : {};
+  if (safeBody.password) safeBody.password = '***';
+  if (safeBody.otp)      safeBody.otp      = '***';
+  if (safeBody.otp_code) safeBody.otp_code = '***';
+  const bodyStr   = Object.keys(safeBody).length > 0
+    ? ' body=' + JSON.stringify(safeBody).substring(0, 300)
+    : '';
+  const queryStr  = Object.keys(req.query  || {}).length > 0
+    ? ' query=' + JSON.stringify(req.query)
+    : '';
+
+  console.log(`[${ts}] ➡️  ${req.method} ${req.path}${queryStr}${bodyStr}`);
+
+  // Intercept res.send untuk catat status + durasi
+  const origSend = res.send.bind(res);
+  res.send = function (body) {
+    const dur   = Date.now() - startMs;
+    const code  = res.statusCode;
+    const emoji = code < 300 ? '✅' : code < 400 ? '↩️ ' : code < 500 ? '⚠️ ' : '❌';
+    console.log(`[${ts}] ${emoji} ${code} ${req.method} ${req.path} (${dur}ms)`);
+
+    // Jika error (4xx/5xx), tampilkan body response juga
+    if (code >= 400 && body) {
+      try {
+        const parsed = JSON.parse(body);
+        if (parsed.message) {
+          console.log(`         └─ message: "${parsed.message}"`);
+        }
+      } catch { /* body bukan JSON */ }
+    }
+
+    return origSend(body);
+  };
+
+  next();
+});
 
 // Database connection
 const dbConfig = {
@@ -40,12 +131,37 @@ const dbConfig = {
   password: process.env.DB_PASSWORD || '',
   database: process.env.DB_NAME || 'absensi_notulensi',
   port: process.env.DB_PORT || 3306,
+  timezone: 'Z',       // Treat DB times as UTC to prevent incorrect shifting
   waitForConnections: true,
   connectionLimit: 10,
-  queueLimit: 0
+  queueLimit: 0,
+  enableKeepAlive: true,    // ← cegah koneksi idle diputus Hostinger
+  keepAliveInitialDelay: 10000, // ← ping setiap 10 detik
+  connectTimeout: 60000,    // ← timeout connect 60 detik
 };
 
 const pool = mysql.createPool(dbConfig);
+
+// ============================================
+// HELPER: execute with auto-retry on ECONNRESET
+// Hostinger MySQL sering drop koneksi idle — retry otomatis 3x
+// ============================================
+const executeWithRetry = async (sql, params = [], retries = 3) => {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return await pool.execute(sql, params);
+    } catch (err) {
+      const isRetryable = err.code === 'ECONNRESET' || err.code === 'PROTOCOL_CONNECTION_LOST' || err.code === 'ECONNREFUSED';
+      if (isRetryable && attempt < retries) {
+        const delay = 500 * attempt;
+        console.warn(`[DB] ${err.code} — retry ${attempt}/${retries - 1} setelah ${delay}ms...`);
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+      throw err;
+    }
+  }
+};
 
 // Email transporter (Hostinger SMTP) dengan connection pool untuk handle banyak user
 const transporter = nodemailer.createTransport({
@@ -479,6 +595,10 @@ app.post('/api/auth/register', async (req, res) => {
       await pool.execute('DELETE FROM otps WHERE email = ?', [email]);
     }
 
+
+    // Emit SSE to update Admin Panel user monitoring
+    emitSse('data_update', { type: 'user' });
+
     res.json({ success: true, message: 'Registrasi berhasil' });
   } catch (error) {
     console.error('Register error:', error);
@@ -562,8 +682,8 @@ app.post('/api/auth/login', async (req, res) => {
 // Get all users (admin only)
 app.get('/api/auth/users', async (req, res) => {
   try {
-    const [users] = await pool.execute(
-      'SELECT * FROM users ORDER BY created_at DESC'
+    const [users] = await executeWithRetry(
+      'SELECT * FROM users ORDER BY tanggal_daftar DESC'
     );
 
     const formattedUsers = users.map(user => ({
@@ -697,6 +817,10 @@ app.put('/api/auth/users/:id', async (req, res) => {
       updateFields.push('tim = ?');
       updateValues.push(updates.tim);
     }
+    if (updates.jabatan !== undefined) {
+      updateFields.push('jabatan = ?');
+      updateValues.push(updates.jabatan);
+    }
     if (updates.role !== undefined) {
       updateFields.push('role = ?');
       updateValues.push(updates.role);
@@ -737,7 +861,11 @@ app.put('/api/auth/users/:id', async (req, res) => {
 app.delete('/api/auth/users/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    await pool.execute('DELETE FROM users WHERE id = ?', [id]);
+    const [result] = await executeWithRetry('DELETE FROM users WHERE id = ?', [id]);
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, message: 'User tidak ditemukan atau sudah dihapus' });
+    }
+    console.log(`[DELETE USER] id=${id} berhasil dihapus`);
     res.json({ success: true });
   } catch (error) {
     console.error('Delete user error:', error);
@@ -850,12 +978,13 @@ app.post('/api/absensi', async (req, res) => {
   try {
     const { userId, namaUser, jenisKegiatan, namaKegiatan, signature, idKegiatan } = req.body;
 
-    const now = new Date();
-    const tanggal = now.toISOString().split('T')[0];
-    const waktu = now.toTimeString().split(' ')[0];
+    const nowWIB = getNowWIB(); // Hanya untuk format string WIB (tanggal, waktu)
+    const nowUTC = new Date(); // True UTC for comparison — true UTC, jangan pakai getNowWIB()!
+    const tanggal = formatDateLocal(nowWIB); // YYYY-MM-DD dalam WIB
+    const waktu   = formatTimeWIB(nowWIB);   // HH:MM:SS dalam WIB
 
     // Check for duplicate attendance
-    const [existing] = await pool.execute(
+    const [existing] = await executeWithRetry(
       'SELECT id FROM absensi WHERE user_id = ? AND (id_kegiatan = ? OR (nama_kegiatan = ? AND tanggal = ?))',
       [userId, idKegiatan || null, namaKegiatan, tanggal]
     );
@@ -872,7 +1001,7 @@ app.post('/api/absensi', async (req, res) => {
     // Check for lateness and session validity if idKegiatan is provided
     let statusKehadiran = 'hadir';
     if (idKegiatan) {
-      const [jadwal] = await pool.execute(
+      const [jadwal] = await executeWithRetry(
         'SELECT jam_mulai, jam_selesai, lateness_threshold_minutes, tanggal, peserta_mode, peserta_spesifik FROM jadwal_rapat WHERE id = ?',
         [idKegiatan]
       );
@@ -890,11 +1019,17 @@ app.post('/api/absensi', async (req, res) => {
         }
 
         const jTanggal = formatDateLocal(j.tanggal);
-        const startDt = new Date(`${jTanggal}T${j.jam_mulai}`);
-        const endDt = new Date(`${jTanggal}T${j.jam_selesai}`);
+        // Parse jam WIB dengan offset +07:00 → menghasilkan UTC yang akurat
+        // jam WIB db: "11:12:00" atau "11:12" — keduanya valid dengan +07:00
+        const startDt = new Date(`${jTanggal}T${j.jam_mulai}+07:00`);
+        const endDt   = new Date(`${jTanggal}T${j.jam_selesai}+07:00`);
+
+        // Debug log
+        const wL = (d) => new Date(d.getTime()+7*3600*1000).toISOString().replace('T',' ').substring(0,16)+' WIB';
+        console.log(`[ABSENSI] now=${wL(nowUTC)} start=${wL(startDt)} end=${wL(endDt)}`);
         
-        // Strict session check: Can't attend if past end time (even if QR is active)
-        if (now > endDt) {
+        // Strict session check: nowUTC (true UTC) vs endDt (true UTC dari +07:00 parse)
+        if (nowUTC > endDt) {
           return res.status(400).json({ 
             success: false, 
             message: 'Kegiatan ini sudah berakhir. Sesi presensi telah ditutup.' 
@@ -904,18 +1039,19 @@ app.post('/api/absensi', async (req, res) => {
         const latenessThreshold = j.lateness_threshold_minutes || 60;
         const latenessTime = new Date(startDt.getTime() + (latenessThreshold * 60000));
         
-        if (now > latenessTime) {
+        if (nowUTC > latenessTime) {
           statusKehadiran = 'terlambat';
         }
       }
     }
 
-    await pool.execute(
+    await executeWithRetry(
       `INSERT INTO absensi (id, user_id, nama_user, jenis_kegiatan, nama_kegiatan, id_kegiatan, tanggal, waktu, signature, status, is_guest, status_kehadiran) 
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'hadir', 0, ?)`,
       [id, userId, namaUser, jenisKegiatan, namaKegiatan, idKegiatan || null, tanggal, waktu, signature, statusKehadiran]
     );
 
+    emitSse('data_update', { type: 'absensi' });
     res.json({ success: true, message: 'Presensi berhasil disimpan' });
   } catch (error) {
     console.error('Save absensi error:', error);
@@ -928,13 +1064,14 @@ app.post('/api/absensi/guest', async (req, res) => {
   try {
     const { nama, instansi, email, jenisKegiatan, namaKegiatan, signature, idKegiatan } = req.body;
 
-    const now = new Date();
-    const tanggal = now.toISOString().split('T')[0];
-    const waktu = now.toTimeString().split(' ')[0];
+    const nowWIB = getNowWIB(); // Hanya untuk format string WIB
+    const nowUTC = new Date(); // True UTC for comparison — true UTC
+    const tanggal = formatDateLocal(nowWIB);
+    const waktu   = formatTimeWIB(nowWIB);
 
     // Check for duplicate guest attendance (by email and activity)
     if (email) {
-      const [existing] = await pool.execute(
+      const [existing] = await executeWithRetry(
         'SELECT id FROM absensi WHERE nama_user = ? AND instansi = ? AND (id_kegiatan = ? OR (nama_kegiatan = ? AND tanggal = ?))',
         [nama, instansi, idKegiatan || null, namaKegiatan, tanggal]
       );
@@ -952,7 +1089,7 @@ app.post('/api/absensi/guest', async (req, res) => {
     // Check for lateness and session validity if idKegiatan is provided
     let statusKehadiran = 'hadir';
     if (idKegiatan) {
-      const [jadwal] = await pool.execute(
+      const [jadwal] = await executeWithRetry(
         'SELECT jam_mulai, jam_selesai, lateness_threshold_minutes, tanggal, peserta_mode, peserta_spesifik FROM jadwal_rapat WHERE id = ?',
         [idKegiatan]
       );
@@ -969,11 +1106,15 @@ app.post('/api/absensi/guest', async (req, res) => {
         }
 
         const jTanggal = formatDateLocal(j.tanggal);
-        const startDt = new Date(`${jTanggal}T${j.jam_mulai}`);
-        const endDt = new Date(`${jTanggal}T${j.jam_selesai}`);
+        // Parse jam WIB dengan offset +07:00 → UTC yang benar
+        const startDt = new Date(`${jTanggal}T${j.jam_mulai}+07:00`);
+        const endDt   = new Date(`${jTanggal}T${j.jam_selesai}+07:00`);
+
+        const wL = (d) => new Date(d.getTime()+7*3600*1000).toISOString().replace('T',' ').substring(0,16)+' WIB';
+        console.log(`[ABSENSI-TAMU] now=${wL(nowUTC)} end=${wL(endDt)}`);
         
-        // Strict session check: Can't attend if past end time (even if QR is active)
-        if (now > endDt) {
+        // Strict session check: nowUTC vs endDt (keduanya true UTC)
+        if (nowUTC > endDt) {
           return res.status(400).json({ 
             success: false, 
             message: 'Kegiatan ini sudah berakhir. Sesi presensi telah ditutup.' 
@@ -983,18 +1124,19 @@ app.post('/api/absensi/guest', async (req, res) => {
         const latenessThreshold = j.lateness_threshold_minutes || 60;
         const latenessTime = new Date(startDt.getTime() + (latenessThreshold * 60000));
         
-        if (now > latenessTime) {
+        if (nowUTC > latenessTime) {
           statusKehadiran = 'terlambat';
         }
       }
     }
 
-    await pool.execute(
+    await executeWithRetry(
       `INSERT INTO absensi (id, user_id, nama_user, jenis_kegiatan, nama_kegiatan, id_kegiatan, tanggal, waktu, signature, status, instansi, email, is_guest, status_kehadiran)
        VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, 'hadir', ?, ?, 1, ?)`,
       [id, nama, jenisKegiatan, namaKegiatan, idKegiatan || null, tanggal, waktu, signature, instansi || null, email || null, statusKehadiran]
     );
 
+    emitSse('data_update', { type: 'absensi' });
     res.json({ success: true, message: 'Presensi tamu berhasil disimpan' });
   } catch (error) {
     console.error('Save guest absensi error:', error);
@@ -1051,7 +1193,11 @@ app.get('/api/absensi', async (req, res) => {
 app.delete('/api/absensi/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    await pool.execute('DELETE FROM absensi WHERE id = ?', [id]);
+    const [result] = await executeWithRetry('DELETE FROM absensi WHERE id = ?', [id]);
+    if (result.affectedRows === 0) {
+      console.warn(`[DELETE] Absensi ID ${id} tidak ditemukan di DB!`);
+      return res.status(404).json({ success: false, message: 'Data tidak ditemukan' });
+    }
     res.json({ success: true });
   } catch (error) {
     console.error('Delete absensi error:', error);
@@ -1062,7 +1208,7 @@ app.delete('/api/absensi/:id', async (req, res) => {
 // Delete all absensi
 app.delete('/api/absensi', async (req, res) => {
   try {
-    await pool.execute('DELETE FROM absensi');
+    await executeWithRetry('DELETE FROM absensi');
     res.json({ success: true });
   } catch (error) {
     console.error('Delete all absensi error:', error);
@@ -1079,18 +1225,22 @@ app.post('/api/notulensi', async (req, res) => {
   try {
     const { userId, namaUser, judul, jenisKegiatan, isi, ringkasan, diskusi, kesimpulan, tanya_jawab, foto, hari, jam, tempat, agenda, signature, pemandu, idKegiatan } = req.body;
 
-    const now = new Date();
-    const tanggal = now.toISOString().split('T')[0];
-    const waktu = now.toTimeString().split(' ')[0];
+    const now = getNowWIB(); // Waktu saat ini dalam WIB (UTC+7)
+    const tanggal = formatDateLocal(now); // YYYY-MM-DD dalam WIB
+    const waktu = formatTimeWIB(now);    // HH:MM:SS dalam WIB
 
+    // Normalize jenis_kegiatan for notulensi enum: ('rapat','doa','rapelan','sharing-knowledge','lainnya')
+    const notulensiJenisMap = { 'doa-bersama': 'doa', 'senam': 'lainnya', 'apel': 'lainnya' };
+    const normalizedJenis = notulensiJenisMap[jenisKegiatan] || jenisKegiatan || 'lainnya';
     const id = randomUUID();
 
-    await pool.execute(
+    await executeWithRetry(
       `INSERT INTO notulensi (id, user_id, nama_user, judul, jenis_kegiatan, id_kegiatan, ringkasan, diskusi, kesimpulan, tanya_jawab, isi, tanggal, waktu, foto, hari, jam, tempat, agenda, signature, pemandu) 
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, userId, namaUser, judul, jenisKegiatan, idKegiatan || null, ringkasan || null, diskusi || null, kesimpulan || null, tanya_jawab || null, isi, tanggal, waktu, foto, hari, jam, tempat, agenda, signature, pemandu]
+      [id, userId, namaUser, judul, normalizedJenis, idKegiatan || null, ringkasan || null, diskusi || null, kesimpulan || null, tanya_jawab || null, isi || null, tanggal, waktu, foto || null, hari || null, jam || null, tempat || null, agenda || null, signature || null, pemandu || null]
     );
 
+    emitSse('data_update', { type: 'notulensi' });
     res.json({ success: true });
   } catch (error) {
     console.error('Save notulensi error:', error);
@@ -1114,7 +1264,7 @@ app.get('/api/notulensi', async (req, res) => {
 
     query += ' ORDER BY created_at DESC';
 
-    const [notulensi] = await pool.execute(query, params);
+    const [notulensi] = await executeWithRetry(query, params);
 
     const formatted = notulensi.map(item => ({
       id: item.id,
@@ -1215,7 +1365,7 @@ app.put('/api/notulensi/:id', async (req, res) => {
     updateFields.push('updated_at = NOW()');
     updateValues.push(id);
 
-    await pool.execute(
+    await executeWithRetry(
       `UPDATE notulensi SET ${updateFields.join(', ')} WHERE id = ?`,
       updateValues
     );
@@ -1231,7 +1381,11 @@ app.put('/api/notulensi/:id', async (req, res) => {
 app.delete('/api/notulensi/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    await pool.execute('DELETE FROM notulensi WHERE id = ?', [id]);
+    const [result] = await executeWithRetry('DELETE FROM notulensi WHERE id = ?', [id]);
+    if (result.affectedRows === 0) {
+      console.warn(`[DELETE] Notulensi ID ${id} tidak ditemukan di DB!`);
+      return res.status(404).json({ success: false, message: 'Data tidak ditemukan' });
+    }
     res.json({ success: true });
   } catch (error) {
     console.error('Delete notulensi error:', error);
@@ -1387,6 +1541,10 @@ app.put('/api/undangan/:id', async (req, res) => {
       }
     });
 
+    if (updateFields.length === 0) {
+      return res.status(400).json({ success: false, message: 'Tidak ada data yang diubah' });
+    }
+
     updateValues.push(id);
 
     await pool.execute(
@@ -1394,7 +1552,7 @@ app.put('/api/undangan/:id', async (req, res) => {
       updateValues
     );
 
-    res.json({ success: true });
+    res.json({ success: true, message: 'Undangan berhasil diupdate' });
   } catch (error) {
     console.error('Update undangan error:', error);
     res.status(500).json({ success: false, message: 'Gagal update undangan' });
@@ -1405,14 +1563,17 @@ app.put('/api/undangan/:id', async (req, res) => {
 app.delete('/api/undangan/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    await pool.execute('DELETE FROM undangan WHERE id = ?', [id]);
+    const [result] = await executeWithRetry('DELETE FROM undangan WHERE id = ?', [id]);
+    if (result.affectedRows === 0) {
+      console.warn(`[DELETE] Undangan ID ${id} tidak ditemukan di DB!`);
+      return res.status(404).json({ success: false, message: 'Data tidak ditemukan' });
+    }
     res.json({ success: true });
   } catch (error) {
     console.error('Delete undangan error:', error);
     res.status(500).json({ success: false, message: 'Gagal hapus undangan' });
   }
 });
-
 // ============================================
 // SERVER-SENT EVENTS (SSE)
 // ============================================
@@ -1493,7 +1654,9 @@ app.post('/api/undangan/:id/broadcast', async (req, res) => {
       
       let userQuery = 'SELECT id FROM users WHERE role != ? AND (is_blocked = 0 OR is_blocked IS NULL)';
       const userParams = ['admin'];
-      if (Array.isArray(pesertaKategori) && pesertaKategori.length > 0) {
+      // If peserta includes 'Semua', skip kategori filter to get all users
+      const hasSemua = Array.isArray(pesertaKategori) && pesertaKategori.includes('Semua');
+      if (!hasSemua && Array.isArray(pesertaKategori) && pesertaKategori.length > 0) {
         userQuery += ` AND kategori IN (${pesertaKategori.map(() => '?').join(',')})`;
         userParams.push(...pesertaKategori);
       }
@@ -1556,7 +1719,7 @@ app.post('/api/undangan/:id/broadcast', async (req, res) => {
         emitSse('notification', {
           id: notifId, type: 'undangan', title: notifTitle,
           message: notifMessage, refId: id, refType: 'undangan',
-          isRead: false, createdAt: new Date().toISOString()
+          isRead: false, createdAt: getNowWIB().toISOString()
         }, [user.id]);
 
         // d. Send email — fire and forget (tidak block loop)
@@ -1721,7 +1884,7 @@ app.post('/api/qr/generate', async (req, res) => {
 
     // Check if there is already an active, non-expired QR for this activity name and type
     // This supports the requirement: "untuk kegiatan berulang cukup 1 kode qr saja"
-    const [existing] = safeJenis && safeNama ? await pool.execute(
+    const [existing] = safeJenis && safeNama ? await executeWithRetry(
       'SELECT id FROM qr_absensi_codes WHERE jenis_kegiatan = ? AND nama_kegiatan = ? AND is_active = 1 AND (expires_at IS NULL OR expires_at > NOW()) LIMIT 1',
       [safeJenis, safeNama]
     ) : [[]];
@@ -1731,9 +1894,14 @@ app.post('/api/qr/generate', async (req, res) => {
       // so peserta_spesifik is read from the correct/latest jadwal
       const reuseId = existing[0].id;
       if (providedIdKegiatan) {
-        await pool.execute(
+        await executeWithRetry(
           'UPDATE qr_absensi_codes SET id_kegiatan = ? WHERE id = ?',
           [providedIdKegiatan, reuseId]
+        );
+        // Sync active_qr_id di jadwal_rapat agar panel admin menampilkan QR
+        await executeWithRetry(
+          'UPDATE jadwal_rapat SET active_qr_id = ? WHERE id = ?',
+          [reuseId, providedIdKegiatan]
         );
       }
       return res.json({ success: true, id: reuseId, message: 'Menggunakan QR yang sudah ada (Reuse)' });
@@ -1761,7 +1929,15 @@ app.post('/api/qr/generate', async (req, res) => {
       : [id, safeJenis, safeNama, idKegiatan, createdBy, createdByName];
 
 
-    await pool.execute(query, params);
+    await executeWithRetry(query, params);
+
+    // Sync active_qr_id di jadwal_rapat agar panel admin langsung menampilkan tombol QR
+    if (providedIdKegiatan) {
+      await executeWithRetry(
+        'UPDATE jadwal_rapat SET active_qr_id = ? WHERE id = ?',
+        [id, providedIdKegiatan]
+      );
+    }
 
     res.json({ success: true, id, idKegiatan });
   } catch (error) {
@@ -1815,7 +1991,7 @@ app.get('/api/qr/active', async (req, res) => {
 // Get QR codes
 app.get('/api/qr', async (req, res) => {
   try {
-    const [codes] = await pool.execute(
+    const [codes] = await executeWithRetry(
       'SELECT * FROM qr_absensi_codes ORDER BY created_at DESC'
     );
 
@@ -1841,7 +2017,7 @@ app.get('/api/qr', async (req, res) => {
 app.get('/api/qr/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const [codes] = await pool.execute(
+    const [codes] = await executeWithRetry(
       `SELECT q.*, j.peserta_mode 
        FROM qr_absensi_codes q 
        LEFT JOIN jadwal_rapat j ON q.id_kegiatan = j.id 
@@ -1855,7 +2031,20 @@ app.get('/api/qr/:id', async (req, res) => {
 
     const item = codes[0];
 
-    // Check expiration
+    // ── DEBUG EXPIRY ─────────────────────────────────────────────────────────
+    const nowMs       = Date.now();
+    const expiresRaw  = item.expires_at;                   // nilai mentah dari mysql2
+    const expiresType = typeof expiresRaw;                 // 'object' (Date) atau 'string'
+    const expiresMs   = expiresRaw ? new Date(expiresRaw).getTime() : null;
+    const wibTs = (ms) => new Date(ms + 7*3600*1000).toISOString().replace('T',' ').substring(0,19) + ' WIB';
+    console.log(`[QR DEBUG] id=${id}`);
+    console.log(`  expires_at raw  : "${expiresRaw}" (type: ${expiresType})`);
+    console.log(`  expires_at UTC  : ${expiresMs ? new Date(expiresMs).toISOString() : 'null'} = ${expiresMs ? wibTs(expiresMs) : 'null'}`);
+    console.log(`  now UTC         : ${new Date(nowMs).toISOString()} = ${wibTs(nowMs)}`);
+    console.log(`  expired?        : ${expiresMs ? nowMs > expiresMs : false}`);
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // Check expiration: bandingkan UTC sebenarnya (new Date()) dengan expires_at dari mysql2
     if (item.expires_at && new Date() > new Date(item.expires_at)) {
       return res.status(400).json({ success: false, message: 'QR Code ini sudah kedaluwarsa.' });
     }
@@ -1886,7 +2075,7 @@ app.get('/api/qr/:id', async (req, res) => {
 app.put('/api/qr/:id/deactivate', async (req, res) => {
   try {
     const { id } = req.params;
-    await pool.execute('UPDATE qr_absensi_codes SET is_active = 0 WHERE id = ?', [id]);
+    await executeWithRetry('UPDATE qr_absensi_codes SET is_active = 0 WHERE id = ?', [id]);
     res.json({ success: true });
   } catch (error) {
     console.error('Deactivate QR error:', error);
@@ -2010,20 +2199,22 @@ app.post('/api/jadwal-rapat', async (req, res) => {
     if (repeatType === 'none' || !repeatType) {
       entriesToInsert.push(tanggal);
     } else {
-      const startDate = new Date(tanggal);
-      const endDate = repeatUntil ? new Date(repeatUntil) : new Date(startDate.getTime() + 90 * 24 * 60 * 60 * 1000); // default 90 days
+      // Pastikan string tanggal diparse sebagai hari yang sama terlepas dari timezone server
+      const startDate = new Date(`${tanggal}T00:00:00+07:00`);
+      const endDate = repeatUntil ? new Date(repeatUntil + 'T23:59:59') : new Date(startDate.getTime() + 90 * 24 * 60 * 60 * 1000);
 
       for (let d = new Date(startDate); d <= endDate; d.setDate(d.getDate() + 1)) {
         const dayOfWeek = d.getDay(); // 0=Sun
+        // Gunakan formatDateLocal agar tanggal berulang tidak bergeser karena UTC
         if (repeatType === 'daily') {
-          entriesToInsert.push(d.toISOString().split('T')[0]);
+          entriesToInsert.push(formatDateLocal(d));
         } else if (repeatType === 'weekly') {
           if (dayOfWeek === startDate.getDay()) {
-            entriesToInsert.push(d.toISOString().split('T')[0]);
+            entriesToInsert.push(formatDateLocal(d));
           }
         } else if (repeatType === 'custom' && Array.isArray(repeatDays)) {
           if (repeatDays.includes(dayOfWeek)) {
-            entriesToInsert.push(d.toISOString().split('T')[0]);
+            entriesToInsert.push(formatDateLocal(d));
           }
         }
       }
@@ -2032,7 +2223,7 @@ app.post('/api/jadwal-rapat', async (req, res) => {
     // Conflict Check Logic (unless allowStack = true)
     if (!allowStack) {
       for (const dateStr of entriesToInsert) {
-        const [existing] = await pool.execute(`
+        const [existing] = await executeWithRetry(`
           SELECT * FROM jadwal_rapat 
           WHERE tanggal = ? AND is_active = 1
           AND (
@@ -2045,8 +2236,8 @@ app.post('/api/jadwal-rapat', async (req, res) => {
         if (existing.length > 0) {
           // Check overlap in tim or peserta
           const hasOverlap = existing.some(e => {
-            const eTim = typeof e.tim === 'string' ? JSON.parse(e.tim) : e.tim;
-            const ePeserta = typeof e.peserta === 'string' ? JSON.parse(e.peserta) : e.peserta;
+            const eTim = typeof e.tim === 'string' ? JSON.parse(e.tim) : (e.tim || []);
+            const ePeserta = typeof e.peserta === 'string' ? JSON.parse(e.peserta) : (e.peserta || []);
             
             const timOverlap = eTim.includes('Semua') || tim.includes('Semua') || eTim.some(t => tim.includes(t));
             const pesertaOverlap = ePeserta.includes('Semua') || peserta.includes('Semua') || ePeserta.some(p => peserta.includes(p));
@@ -2069,7 +2260,7 @@ app.post('/api/jadwal-rapat', async (req, res) => {
     const insertedIds = [];
     for (const dateStr of entriesToInsert) {
       const id = randomUUID();
-      await pool.execute(
+      await executeWithRetry(
         `INSERT INTO jadwal_rapat 
          (id, judul, deskripsi, tanggal, jam_mulai, jam_selesai, tim, peserta, repeat_type, repeat_days, repeat_until, allow_stack, open_offset_minutes, close_offset_minutes, lateness_threshold_minutes, jenis_kegiatan, peserta_mode, peserta_spesifik, created_by)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -2096,37 +2287,57 @@ app.post('/api/jadwal-rapat', async (req, res) => {
 // Get all jadwal rapat
 app.get('/api/jadwal-rapat', async (req, res) => {
   try {
-    const [rows] = await pool.execute(
-      'SELECT * FROM jadwal_rapat ORDER BY tanggal DESC, jam_mulai ASC'
+    const [rows] = await executeWithRetry(
+      `SELECT j.*,
+         (SELECT q.id FROM qr_absensi_codes q
+          WHERE q.id_kegiatan = j.id AND q.is_active = 1
+            AND (q.expires_at IS NULL OR q.expires_at > NOW())
+          ORDER BY q.created_at DESC LIMIT 1) AS effective_qr_id
+       FROM jadwal_rapat j
+       ORDER BY j.tanggal DESC, j.jam_mulai ASC`
     );
 
-    const formatted = rows.map(r => ({
-      id: r.id,
-      judul: r.judul,
-      deskripsi: r.deskripsi,
-      tanggal: r.tanggal ? formatDateLocal(r.tanggal) : null,
-      jamMulai: r.jam_mulai,
-      jamSelesai: r.jam_selesai,
-      tim: typeof r.tim === 'string' ? JSON.parse(r.tim) : r.tim,
-      peserta: typeof r.peserta === 'string' ? JSON.parse(r.peserta) : r.peserta,
-      repeatType: r.repeat_type,
-      repeatDays: r.repeat_days ? (typeof r.repeat_days === 'string' ? JSON.parse(r.repeat_days) : r.repeat_days) : null,
-      repeatUntil: r.repeat_until ? (typeof r.repeat_until === 'string' ? r.repeat_until : new Date(r.repeat_until).toISOString().split('T')[0]) : null,
-      allowStack: !!r.allow_stack,
-      openOffsetMinutes: r.open_offset_minutes,
-      closeOffsetMinutes: r.close_offset_minutes,
-      latenessThresholdMinutes: r.lateness_threshold_minutes,
-      jenisKegiatan: r.jenis_kegiatan,
-      pesertaMode: r.peserta_mode || 'akun',
-      pesertaSpesifik: r.peserta_spesifik ? (typeof r.peserta_spesifik === 'string' ? JSON.parse(r.peserta_spesifik) : r.peserta_spesifik) : [],
-      createdBy: r.created_by,
-      isActive: !!r.is_active,
-      createdAt: r.created_at
-    }));
+    const safeJsonParse = (val, fallback = []) => {
+      if (!val) return fallback;
+      if (typeof val !== 'string') return val; // sudah di-parse oleh mysql2
+      try { return JSON.parse(val); } catch { return fallback; }
+    };
+
+    const formatted = rows.map(r => {
+      try {
+        return {
+          id: r.id,
+          judul: r.judul,
+          deskripsi: r.deskripsi,
+          tanggal: r.tanggal ? formatDateLocal(r.tanggal) : null,
+          jamMulai: r.jam_mulai,
+          jamSelesai: r.jam_selesai,
+          tim: safeJsonParse(r.tim, []),
+          peserta: safeJsonParse(r.peserta, []),
+          repeatType: r.repeat_type || 'none',
+          repeatDays: safeJsonParse(r.repeat_days, null),
+          repeatUntil: r.repeat_until ? (typeof r.repeat_until === 'string' ? r.repeat_until : formatDateLocal(r.repeat_until)) : null,
+          allowStack: !!r.allow_stack,
+          openOffsetMinutes: r.open_offset_minutes || 0,
+          closeOffsetMinutes: r.close_offset_minutes || 0,
+          latenessThresholdMinutes: r.lateness_threshold_minutes || 60,
+          jenisKegiatan: r.jenis_kegiatan || 'rapat',
+          pesertaMode: r.peserta_mode || 'akun',
+          pesertaSpesifik: safeJsonParse(r.peserta_spesifik, []),
+          createdBy: r.created_by,
+          isActive: !!r.is_active,
+          createdAt: r.created_at,
+          activeQRId: r.active_qr_id || r.effective_qr_id || null
+        };
+      } catch (rowErr) {
+        console.error(`[jadwal-rapat] Error parsing row id=${r.id}:`, rowErr.message, r);
+        return null;
+      }
+    }).filter(Boolean); // buang baris yang gagal parse
 
     res.json(formatted);
   } catch (error) {
-    console.error('Get jadwal rapat error:', error);
+    console.error('Get jadwal rapat error:', error.message, error.stack);
     res.status(500).json([]);
   }
 });
@@ -2136,14 +2347,15 @@ app.get('/api/jadwal-rapat/active', async (req, res) => {
   try {
     const { tim, kategori } = req.query;
 
-     let [rows] = await pool.execute(
-      `SELECT j.*, q.id as active_qr_id 
+    // Gunakan subquery — JOIN via id_kegiatan lebih reliable dari active_qr_id kolom
+    let [rows] = await executeWithRetry(
+      `SELECT j.*,
+         (SELECT q.id FROM qr_absensi_codes q
+          WHERE q.id_kegiatan = j.id AND q.is_active = 1
+            AND (q.expires_at IS NULL OR q.expires_at > NOW())
+          ORDER BY q.created_at DESC LIMIT 1) AS qr_id_active
        FROM jadwal_rapat j
-       LEFT JOIN qr_absensi_codes q ON (
-         j.active_qr_id = q.id AND q.is_active = 1 AND (q.expires_at IS NULL OR q.expires_at > NOW())
-       )
-       WHERE j.tanggal = CURDATE() AND j.is_active = 1 
-       GROUP BY j.id, j.judul, j.jam_mulai, j.jam_selesai, j.jenis_kegiatan
+       WHERE j.tanggal = DATE(DATE_ADD(CONVERT_TZ(NOW(), @@session.time_zone, '+00:00'), INTERVAL 7 HOUR)) AND j.is_active = 1
        ORDER BY j.jam_mulai ASC`
     );
 
@@ -2166,7 +2378,7 @@ app.get('/api/jadwal-rapat/active', async (req, res) => {
       pesertaSpesifik: r.peserta_spesifik ? (typeof r.peserta_spesifik === 'string' ? JSON.parse(r.peserta_spesifik) : r.peserta_spesifik) : [],
       createdBy: r.created_by,
       isActive: !!r.is_active,
-      activeQRId: r.active_qr_id
+      activeQRId: r.active_qr_id || r.qr_id_active || null
     }));
 
 
@@ -2187,9 +2399,11 @@ app.get('/api/jadwal-rapat/active', async (req, res) => {
 
     // Assign UI visibility & absen state attributes based on time
     // Get current local time from MySQL (ensures correct timezone)
-    const [[{ localNow }]] = await pool.execute("SELECT NOW() as localNow");
+    // Ambil waktu WIB langsung dari MySQL (karena sudah di-set timezone: '+07:00')
+    const [[{ localNow }]] = await executeWithRetry("SELECT NOW() as localNow");
     const now = new Date(localNow);
-    const currentDateStr = now.toISOString().split('T')[0];
+    // localNow dari MySQL sudah WIB, format string-nya langsung bisa dipakai
+    const currentDateStr = formatDateLocal(localNow);
     
     formatted = formatted.map(j => {
        // Parse jam as local time using local date string to avoid UTC offset issues
@@ -2209,6 +2423,7 @@ app.get('/api/jadwal-rapat/active', async (req, res) => {
        let state = 'closed';
        if (now < openTime) state = 'disabled';
        else if (now >= openTime && now <= closeTime) state = 'open';
+       else if (now > closeTime) state = 'finished';
 
        // Construct tooltip and extra attributes
        const openTimeString = openTime.toLocaleTimeString('id-ID', { hour:'2-digit', minute:'2-digit' });
@@ -2274,19 +2489,74 @@ app.put('/api/jadwal-rapat/:id', async (req, res) => {
   }
 });
 
-// Delete jadwal rapat
+// Delete jadwal rapat — STIK (Strict Transactional Integrated Kick)
 app.delete('/api/jadwal-rapat/:id', async (req, res) => {
+  let connection;
   try {
     const { id } = req.params;
-    await pool.execute('DELETE FROM jadwal_rapat WHERE id = ?', [id]);
-    res.json({ success: true, message: 'Jadwal berhasil dihapus' });
+    connection = await pool.getConnection();
+
+    // 1. Fetch info for the schedule to be deleted
+    const [targetRows] = await connection.execute('SELECT * FROM jadwal_rapat WHERE id = ?', [id]);
+    if (targetRows.length === 0) {
+      connection.release();
+      console.warn(`[DELETE] Jadwal Rapat ID ${id} tidak ditemukan di DB!`);
+      return res.status(404).json({ success: false, message: 'Data tidak ditemukan' });
+    }
+    const target = targetRows[0];
+
+    // 2. Identify all IDs in the series (recurrence)
+    // We group by judul, creator, and timing signature.
+    let idsToDelete = [id];
+    if (target.repeat_type && target.repeat_type !== 'none') {
+      const [seriesRows] = await connection.execute(
+        `SELECT id FROM jadwal_rapat 
+         WHERE judul = ? AND created_by = ? AND jam_mulai = ? AND jam_selesai = ? AND repeat_type = ? 
+         AND (repeat_until = ? OR (repeat_until IS NULL AND ? IS NULL))`,
+        [target.judul, target.created_by, target.jam_mulai, target.jam_selesai, target.repeat_type, target.repeat_until, target.repeat_until]
+      );
+      idsToDelete = seriesRows.map(r => r.id);
+    }
+
+    // 3. Start Transaction for strict deletion
+    await connection.beginTransaction();
+
+    const placeholders = idsToDelete.map(() => '?').join(',');
+    
+    // a. Delete linked QR codes
+    await connection.execute(`DELETE FROM qr_absensi_codes WHERE id_kegiatan IN (${placeholders})`, idsToDelete);
+    
+    // b. Delete linked invitations (undangan)
+    await connection.execute(`DELETE FROM undangan WHERE id_kegiatan IN (${placeholders})`, idsToDelete);
+    
+    // c. Delete linked minutes (notulensi)
+    await connection.execute(`DELETE FROM notulensi WHERE id_kegiatan IN (${placeholders})`, idsToDelete);
+    
+    // d. Delete linked attendance (absensi)
+    await connection.execute(`DELETE FROM absensi WHERE id_kegiatan IN (${placeholders})`, idsToDelete);
+    
+    // e. Finally delete the schedule(s)
+    await connection.execute(`DELETE FROM jadwal_rapat WHERE id IN (${placeholders})`, idsToDelete);
+
+    await connection.commit();
+    
+    emitSse('data_update', { type: 'jadwal' });
+    res.json({ 
+      success: true, 
+      message: idsToDelete.length > 1 
+        ? `${idsToDelete.length} jadwal dalam rangkaian dan seluruh data terkait berhasil dihapus`
+        : 'Jadwal dan seluruh data terkait berhasil dihapus'
+    });
+
   } catch (error) {
+    if (connection) await connection.rollback();
     console.error('Delete jadwal rapat error:', error);
-    res.status(500).json({ success: false, message: 'Gagal menghapus jadwal' });
+    res.status(500).json({ success: false, message: 'Gagal menghapus jadwal dan data terkait' });
+  } finally {
+    if (connection) connection.release();
   }
 });
 
-// Start server
 app.listen(PORT, () => {
   console.log(`🚀 Server running on http://localhost:${PORT}`);
 });

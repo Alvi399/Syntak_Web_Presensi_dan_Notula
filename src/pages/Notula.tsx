@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { useDataSync } from '@/hooks/useDataSync';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -61,6 +62,11 @@ export default function Notula() {
     loadNotulensi();
     loadActiveJadwal();
   }, []);
+
+  useDataSync(['all'], () => {
+    loadNotulensi();
+    loadActiveJadwal();
+  });
 
   useEffect(() => {
     if (isDialogOpen && canvasRef.current) {
@@ -138,21 +144,55 @@ export default function Notula() {
     try {
       let success;
       if (editingNotulensi) {
-        success = await dataService.updateNotulensi(editingNotulensi.id, formData);
+        // Optimistic update: perbarui item di state lokal segera
+        setNotulensiList(prev =>
+          prev.map(n =>
+            n.id === editingNotulensi.id
+              ? { ...n, ...formData } as NotulensiRecord
+              : n
+          )
+        );
+        success = await dataService.updateNotulensi(editingNotulensi.id, formData as any);
       } else {
-        success = await dataService.saveNotulensi(formData);
+        // Optimistic insert: tambahkan item sementara ke list segera
+        const now = new Date();
+        const tempItem: NotulensiRecord = {
+          id: `temp-${now.getTime()}`,
+          userId: currentUser?.id || '',
+          namaUser: currentUser?.nama || '',
+          judul: formData.judul,
+          jenisKegiatan: (formData.jenisKegiatan || 'lainnya') as NotulensiRecord['jenisKegiatan'],
+          idKegiatan: formData.idKegiatan,
+          ringkasan: formData.ringkasan,
+          diskusi: formData.diskusi,
+          kesimpulan: formData.kesimpulan,
+          tanya_jawab: formData.tanya_jawab,
+          isi: formData.isi,
+          foto: formData.foto,
+          signature: formData.signature,
+          pemandu: formData.pemandu,
+          tempat: formData.tempat,
+          tanggal: now.toISOString().split('T')[0],
+          waktu: now.toTimeString().slice(0, 5),
+        };
+        setNotulensiList(prev => [tempItem, ...prev]);
+        success = await dataService.saveNotulensi(formData as any);
       }
 
       if (success) {
         toast.success(editingNotulensi ? 'Notula diperbarui' : 'Notula disimpan');
         setIsDialogOpen(false);
         resetForm();
+        // Refresh di background untuk replace data temp dengan data asli dari server
         loadNotulensi();
       } else {
         toast.error('Gagal menyimpan notula');
+        // Rollback optimistic update
+        loadNotulensi();
       }
     } catch (error) {
       toast.error('Terjadi kesalahan');
+      loadNotulensi();
     } finally {
       setIsSubmitting(false);
     }
@@ -177,10 +217,26 @@ export default function Notula() {
 
   const handleDelete = async (id: string) => {
     if (!window.confirm('Hapus notula ini?')) return;
-    const success = await dataService.deleteNotulensi(id);
-    if (success) {
-      toast.success('Notula dihapus');
-      loadNotulensi();
+    
+    // Optimistic update: backup and remove locally
+    const previousData = [...notulensiList];
+    setNotulensiList(prev => prev.filter(n => n.id !== id));
+    
+    try {
+      const success = await dataService.deleteNotulensi(id);
+      if (success) {
+        toast.success('Notula dihapus');
+        // Re-verify with server after a short delay to ensure DB consistency
+        setTimeout(() => loadNotulensi(), 500);
+      } else {
+        toast.error('Gagal menghapus notula');
+        // Rollback: restore from backup
+        setNotulensiList(previousData);
+      }
+    } catch (err) {
+      toast.error('Terjadi kesalahan saat menghapus');
+      setNotulensiList(previousData); // Rollback
+      loadNotulensi(); // Hard refresh
     }
   };
 

@@ -444,6 +444,8 @@ export default function Login({ onLoginSuccess }: LoginProps) {
                           <SelectItem value="Produksi">Produksi</SelectItem>
                           <SelectItem value="Neraca">Neraca</SelectItem>
                           <SelectItem value="POTIK">POTIK</SelectItem>
+                          <SelectItem value="Umum">Umum</SelectItem>
+                          <SelectItem value="UKK">UKK</SelectItem>
                         </SelectContent>
                       </Select>
                     </div>

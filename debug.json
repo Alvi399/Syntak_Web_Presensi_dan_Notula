@@ -1,0 +1,8 @@
+{
+  "jadwalRes": {
+    "success": false,
+    "status": "rejected",
+    "reason": "conflict",
+    "message": "Konflik jadwal terdeteksi pada 2026-04-08. Terdapat jadwal lain yang beririsan untuk tim/kategori yang sama."
+  }
+}

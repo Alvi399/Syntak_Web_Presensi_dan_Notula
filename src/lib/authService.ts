@@ -30,8 +30,6 @@ class AuthService {
 
   constructor() {
     this.loadCurrentUser();
-    // Memanggil ensureAdminExists secara async tanpa await agar constructor selesai cepat
-    this.ensureAdminExists().catch(err => console.error('Initial admin check failed:', err));
   }
 
   private loadCurrentUser() {

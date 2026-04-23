@@ -1,0 +1,112 @@
+[
+  {
+    "status": "OK",
+    "name": "Init Admin",
+    "extra": null
+  },
+  {
+    "status": "OK",
+    "name": "Login",
+    "extra": null
+  },
+  {
+    "status": "OK",
+    "name": "Create Jadwal Rapat",
+    "extra": null
+  },
+  {
+    "status": "OK",
+    "name": "Get Jadwal Rapat List",
+    "extra": null
+  },
+  {
+    "status": "OK",
+    "name": "Get Active Jadwal Rapat",
+    "extra": null
+  },
+  {
+    "status": "OK",
+    "name": "Update Jadwal Rapat",
+    "extra": null
+  },
+  {
+    "status": "OK",
+    "name": "Generate QR Code",
+    "extra": null
+  },
+  {
+    "status": "OK",
+    "name": "Get QR List",
+    "extra": null
+  },
+  {
+    "status": "OK",
+    "name": "Get Specific QR",
+    "extra": null
+  },
+  {
+    "status": "FAILED",
+    "name": "Create Absensi",
+    "extra": {
+      "response": {
+        "success": false,
+        "message": "Anda sudah melakukan presensi untuk kegiatan ini hari ini."
+      }
+    }
+  },
+  {
+    "status": "OK",
+    "name": "Get Absensi by User",
+    "extra": null
+  },
+  {
+    "status": "OK",
+    "name": "Create Notulensi",
+    "extra": null
+  },
+  {
+    "status": "OK",
+    "name": "Get Notulensi List",
+    "extra": null
+  },
+  {
+    "status": "OK",
+    "name": "Create Undangan",
+    "extra": null
+  },
+  {
+    "status": "OK",
+    "name": "Get Undangan List",
+    "extra": null
+  },
+  {
+    "status": "FAILED",
+    "name": "Update Undangan",
+    "extra": {
+      "response": {
+        "success": false,
+        "message": "Tidak ada data yang diubah"
+      }
+    }
+  },
+  {
+    "status": "OK",
+    "name": "Broadcast Undangan",
+    "extra": null
+  },
+  {
+    "status": "OK",
+    "name": "Cleanup Undangan",
+    "extra": null
+  },
+  {
+    "status": "OK",
+    "name": "Cleanup Notulensi",
+    "extra": null
+  },
+  {
+    "status": "OK",
+    "name": "Cleanup Jadwal Rapat",
+    "extra": null
+  }
+]

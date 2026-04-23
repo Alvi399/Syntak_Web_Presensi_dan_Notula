@@ -10,9 +10,20 @@ Aplikasi **Syntak** adalah sistem internal BPS Kota Surabaya untuk:
 
 Frontend dibangun dengan **React + Vite + TypeScript + Tailwind + shadcn/ui**, dan backend dengan **Node.js (Express) + MySQL**.
 
+
 ---
 
-### Login Admin Default
+### Dokumentasi Teknis
+
+Untuk informasi lebih mendalam mengenai sistem, silakan baca dokumentasi berikut di folder `docs/`:
+
+- [Skema Database (ERD & Tabel)](./docs/DATABASE_SCHEMA.md)
+- [Arsitektur Backend & Mekanisme](./docs/BACKEND_SYSTEM.md)
+- [Arsitektur Frontend](./docs/FRONTEND_ARCHITECTURE.md)
+- [Spesifikasi API](./docs/API_SPEC.md)
+
+---
+
 
 - **Email**: `admin@absensi.com`  
 - **Password**: `admin123`

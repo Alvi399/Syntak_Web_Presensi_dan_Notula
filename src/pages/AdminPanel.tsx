@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { useDataSync } from '@/hooks/useDataSync';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -77,6 +78,7 @@ export default function AdminPanel() {
     hari: '',
     tanggal: '',
     tempat: '',
+    waktu: '',
     exportType: 'pdf' as 'pdf' | 'excel'
   });
   const [message, setMessage] = useState({ type: '', text: '' });
@@ -109,6 +111,11 @@ export default function AdminPanel() {
     return () => clearInterval(interval);
   }, []);
 
+  // Real-time synchronization
+  useDataSync(['all'], () => {
+    loadAdminData();
+  });
+
   const checkAndUnblockExpiredUsers = async () => {
     const users = await authService.getAllUsersForAdmin();
     let hasChanges = false;
@@ -131,12 +138,14 @@ export default function AdminPanel() {
   };
 
   const loadAdminData = async () => {
+    // Fetch semua data secara paralel — tiap call dibungkus try-catch sendiri
+    // agar satu kegagalan tidak menghalangi update state yang lain
     const [usersData, activitiesData, absensiList, notulensiList, jadwalList] = await Promise.all([
-      authService.getAllUsersForAdmin(),
-      authService.getActivities(),
-      dataService.getAbsensiList(),
-      dataService.getNotulensiList(),
-      dataService.getJadwalRapat()
+      authService.getAllUsersForAdmin().catch(e => { console.error('loadAdminData: users failed', e); return []; }),
+      authService.getActivities().catch(e => { console.error('loadAdminData: activities failed', e); return []; }),
+      dataService.getAbsensiList().catch(e => { console.error('loadAdminData: absensi failed', e); return []; }),
+      dataService.getNotulensiList().catch(e => { console.error('loadAdminData: notulensi failed', e); return []; }),
+      dataService.getJadwalRapat().catch(e => { console.error('loadAdminData: jadwal failed', e); return []; })
     ]);
     
     setUsers(usersData);
@@ -148,12 +157,19 @@ export default function AdminPanel() {
 
   const handleDeleteJadwal = async (id: string) => {
     if (window.confirm('Yakin ingin menghapus jadwal ini?')) {
+      // Optimistic update: hapus dari state lokal segera
+      const previousData = [...jadwalRapatData];
+      setJadwalRapatData(prev => prev.filter(j => j.id !== id));
+      
       const success = await dataService.deleteJadwalRapat(id);
       if (success) {
         setMessage({ type: 'success', text: 'Jadwal berhasil dihapus' });
-        await loadAdminData();
+        // Re-verify with server after a short delay to ensure DB consistency
+        setTimeout(() => loadAdminData(), 500);
       } else {
         setMessage({ type: 'error', text: 'Gagal menghapus jadwal' });
+        // Rollback
+        setJadwalRapatData(previousData);
       }
     }
   };
@@ -209,7 +225,7 @@ export default function AdminPanel() {
 
 
 
-  const timOptions = ['Distribusi', 'ZI', 'PSS', 'POTIK', 'Produksi', 'Sosial', 'TU', 'Neraca'];
+  const timOptions = ['Distribusi', 'ZI', 'PSS', 'POTIK', 'Produksi', 'Sosial', 'TU', 'Neraca','Humas','IPDS','Umum','UKK'];
   const dayNames = ['Min', 'Sen', 'Sel', 'Rab', 'Kam', 'Jum', 'Sab'];
 
   const handleUserSubmit = async (e: React.FormEvent) => {
@@ -218,8 +234,16 @@ export default function AdminPanel() {
 
     try {
       let success = false;
-      
+
       if (editingUser) {
+        // Optimistic update: perbarui user di state lokal segera
+        setUsers(prev =>
+          prev.map(u =>
+            u.id === editingUser.id
+              ? { ...u, nama: userForm.nama, email: userForm.email, kategori: userForm.kategori as UserKategori, tim: userForm.tim, role: userForm.role as UserRole }
+              : u
+          )
+        );
         success = await authService.updateUser(editingUser.id, {
           nama: userForm.nama,
           email: userForm.email,
@@ -229,31 +253,46 @@ export default function AdminPanel() {
           ...(userForm.password && { password: userForm.password })
         });
       } else {
+        // Optimistic insert: tambahkan user sementara ke list segera
+        const tempUser: User = {
+          id: `temp-${Date.now()}`,
+          nama: userForm.nama,
+          email: userForm.email,
+          kategori: userForm.kategori as UserKategori,
+          tim: userForm.tim,
+          role: userForm.role as UserRole,
+          tanggalDaftar: new Date().toISOString(),
+          isBlocked: false,
+        };
+        setUsers(prev => [...prev, tempUser]);
         const result = await authService.register(
           userForm.nama,
           userForm.email,
           userForm.password,
           userForm.kategori as UserKategori,
           userForm.tim,
-          'ADMIN', // bypass OTP
-          userForm.role as UserRole
+          'ADMIN' // bypass OTP
         );
         success = result.success;
       }
 
       if (success) {
-        setMessage({ 
-          type: 'success', 
-          text: editingUser ? 'User berhasil diperbarui!' : 'User berhasil ditambahkan!' 
+        setMessage({
+          type: 'success',
+          text: editingUser ? 'User berhasil diperbarui!' : 'User berhasil ditambahkan!'
         });
         resetUserForm();
-        await loadAdminData();
         setIsUserDialogOpen(false);
+        // Refresh di background untuk replace data temp dengan data asli dari server
+        loadAdminData();
       } else {
         setMessage({ type: 'error', text: 'Gagal menyimpan data user' });
+        // Rollback optimistic update
+        loadAdminData();
       }
     } catch (error) {
       setMessage({ type: 'error', text: 'Terjadi kesalahan sistem' });
+      loadAdminData();
     }
   };
 
@@ -272,12 +311,17 @@ export default function AdminPanel() {
 
   const handleDeleteUser = async (userId: string) => {
     if (window.confirm('Apakah Anda yakin ingin menghapus user ini?')) {
+      // Optimistic update
+      const previousUsers = [...users];
+      setUsers(prev => prev.filter(u => u.id !== userId));
+      
       const success = await authService.deleteUser(userId);
       if (success) {
         setMessage({ type: 'success', text: 'User berhasil dihapus!' });
-        await loadAdminData();
+        setTimeout(() => loadAdminData(), 500);
       } else {
         setMessage({ type: 'error', text: 'Gagal menghapus user' });
+        setUsers(previousUsers); // Rollback
       }
     }
   };
@@ -336,24 +380,34 @@ export default function AdminPanel() {
 
   const handleDeleteAbsensi = async (absensiId: string) => {
     if (window.confirm('Apakah Anda yakin ingin menghapus data absensi ini?')) {
+      // Optimistic update
+      const previousData = [...absensiData];
+      setAbsensiData(prev => prev.filter(a => a.id !== absensiId));
+      
       const success = await dataService.deleteAbsensi(absensiId);
       if (success) {
         setMessage({ type: 'success', text: 'Data absensi berhasil dihapus!' });
-        await loadAdminData();
+        setTimeout(() => loadAdminData(), 500);
       } else {
         setMessage({ type: 'error', text: 'Gagal menghapus data absensi' });
+        setAbsensiData(previousData); // Rollback
       }
     }
   };
 
   const handleDeleteNotulensi = async (notulensiId: string) => {
     if (window.confirm('Apakah Anda yakin ingin menghapus notulensi ini?')) {
+      // Optimistic update
+      const previousData = [...notulensiData];
+      setNotulensiData(prev => prev.filter(n => n.id !== notulensiId));
+      
       const success = await dataService.deleteNotulensi(notulensiId);
       if (success) {
         setMessage({ type: 'success', text: 'Notulensi berhasil dihapus!' });
-        await loadAdminData();
+        setTimeout(() => loadAdminData(), 500);
       } else {
         setMessage({ type: 'error', text: 'Gagal menghapus notulensi' });
+        setNotulensiData(previousData); // Rollback
       }
     }
   };
@@ -418,6 +472,7 @@ export default function AdminPanel() {
       hari: '',
       tanggal: '',
       tempat: '',
+      waktu: '',
       exportType: 'pdf'
     });
   };
@@ -506,15 +561,16 @@ export default function AdminPanel() {
     doc.text(`: ${exportForm.hari}, ${exportForm.tanggal}`, 45, 72);
     doc.text('Tempat', 14, 79);
     doc.text(`: ${exportForm.tempat}`, 45, 79);
+    doc.text('Waktu', 14, 86);
+    doc.text(`: ${exportForm.waktu}`, 45, 86);
     
-    const startY = 88;
+    const startY = 95;
     doc.setFontSize(10);
     doc.setFont('helvetica', 'bold');
     
-    // Adjusted widths to fit Page Width better (roughly ~180 usable width)
-    // No: 10, Nama: 50, Tim/Bagian: 40, Jabatan: 45, TTD: 35
-    const colWidths = [10, 50, 40, 45, 35];
-    const headers = ['No', 'Nama', 'Tim/Bagian', 'Jabatan', 'TTD'];
+    // Kolom: No(10), Nama(40), Waktu Presensi(28), Tim/Bagian(32), Jabatan(38), TTD(32)
+    const colWidths = [10, 40, 28, 32, 38, 32];
+    const headers = ['No', 'Nama', 'Waktu Presensi', 'Tim/Bagian', 'Jabatan', 'TTD'];
     let currentX = 14;
     
     headers.forEach((header, i) => {
@@ -535,64 +591,82 @@ export default function AdminPanel() {
       const user = users.find(u => u.id === item.userId);
       const nama = item.isGuest && item.instansi ? `${item.namaUser} (${item.instansi})` : item.namaUser;
       
+      // Hitung wrapping nama dan jabatan agar muat di kolom tanpa terpotong
+      const lineHeight = 5;
+      const cellPad = 3;
+      const namaLines = doc.splitTextToSize(nama, colWidths[1] - 4);
+      
+      const jabatan = item.isGuest ? '-' : ((user as any)?.jabatan || '-');
+      const jabatanLines = doc.splitTextToSize(jabatan, colWidths[4] - 4);
+      
+      // Ambil tinggi baris maksimal antara nama dan jabatan
+      const totalLines = Math.max(namaLines.length, jabatanLines.length);
+      const rowHeight = Math.max(12, totalLines * lineHeight + cellPad * 2);
+      
       currentX = 14;
-      const rowHeight = 12;
       
       // Cell 1: No
       doc.rect(currentX, currentY, colWidths[0], rowHeight);
-      doc.text(`${index + 1}`, currentX + colWidths[0] / 2, currentY + 8, { align: 'center' });
+      doc.text(`${index + 1}`, currentX + colWidths[0] / 2, currentY + rowHeight / 2 + 1.5, { align: 'center' });
       currentX += colWidths[0];
       
-      // Cell 2: Nama
+      // Cell 2: Nama (multi-line wrap)
       doc.rect(currentX, currentY, colWidths[1], rowHeight);
-      doc.text(nama.substring(0, 25), currentX + 2, currentY + 8);
+      doc.text(namaLines, currentX + 2, currentY + cellPad + lineHeight);
       currentX += colWidths[1];
 
-      // Cell 3: Tim/Bagian
+      // Cell 3: Waktu Presensi
       doc.rect(currentX, currentY, colWidths[2], rowHeight);
-      const tim = item.isGuest ? '-' : (user?.tim || '-');
-      doc.text(tim.substring(0, 20), currentX + 2, currentY + 8);
+      const waktuPresensi = item.waktu ? item.waktu.substring(0, 5) : '-';
+      doc.text(waktuPresensi, currentX + colWidths[2] / 2, currentY + rowHeight / 2 + 1.5, { align: 'center' });
       currentX += colWidths[2];
-      
-      // Cell 4: Jabatan
+
+      // Cell 4: Tim/Bagian
       doc.rect(currentX, currentY, colWidths[3], rowHeight);
-      // Fallback: If guest, write '-', else read Jabatan from User 
-      // (assuming user object has jabatan, if not fallback to '-')
-      const jabatan = item.isGuest ? '-' : (user?.jabatan || '-');
-      doc.text(jabatan.substring(0, 22), currentX + 2, currentY + 8);
+      const tim = item.isGuest ? '-' : (user?.tim || '-');
+      const timLines = doc.splitTextToSize(tim, colWidths[3] - 4);
+      doc.text(timLines, currentX + colWidths[3] / 2, currentY + cellPad + lineHeight, { align: 'center' });
       currentX += colWidths[3];
       
-      // Cell 5: Tanda Tangan
+      // Cell 5: Jabatan
       doc.rect(currentX, currentY, colWidths[4], rowHeight);
+      doc.text(jabatanLines, currentX + colWidths[4] / 2, currentY + cellPad + lineHeight, { align: 'center' });
+      currentX += colWidths[4];
+      
+      // Cell 6: Tanda Tangan
+      doc.rect(currentX, currentY, colWidths[5], rowHeight);
       if (item.signature) {
         try {
-          // Centering the image in the cell
-          doc.addImage(item.signature, 'PNG', currentX + (colWidths[4] - 20) / 2, currentY + 1, 20, 10);
+          const sigY = currentY + (rowHeight - 10) / 2;
+          doc.addImage(item.signature, 'PNG', currentX + (colWidths[5] - 20) / 2, sigY, 20, 10);
         } catch (e) {
-          doc.text('-', currentX + colWidths[4] / 2, currentY + 8, { align: 'center' });
+          doc.text('-', currentX + colWidths[5] / 2, currentY + rowHeight / 2 + 1.5, { align: 'center' });
         }
       } else {
-        doc.text('-', currentX + colWidths[4] / 2, currentY + 8, { align: 'center' });
+        doc.text('-', currentX + colWidths[5] / 2, currentY + rowHeight / 2 + 1.5, { align: 'center' });
       }
       
       currentY += rowHeight;
     });
     
-    currentY = pageHeight - 45;
+    // Footer: rata kiri-tengah (indented), posisi bawah halaman
+    currentY = pageHeight - 52;
+    const footerX = 150; // indent ≈ 60% dari lebar halaman
     doc.setFontSize(10);
-    doc.text(`Surabaya, ${new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}`, pageWidth - 60, currentY);
-    doc.text('Mengetahui,', pageWidth - 60, currentY + 7);
+    doc.setFont('helvetica', 'normal');
+    doc.text(`Surabaya, ${new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}`, footerX, currentY);
+    doc.text('Mengetahui,', footerX, currentY + 7);
     
     if (signature) {
       try {
-        doc.addImage(signature, 'PNG', pageWidth - 75, currentY + 12, 30, 15);
+        doc.addImage(signature, 'PNG', footerX, currentY + 11, 30, 15);
       } catch (e) {
         console.error('Error adding signature:', e);
       }
     }
     
     doc.setFont('helvetica', 'bold');
-    doc.text('Kepala BPS Kota Surabaya', pageWidth - 60, currentY + 32, { align: 'center' });
+    doc.text('Kepala BPS Kota Surabaya', footerX, currentY + 32);
     
     doc.save(`Absensi_${exportForm.judulKegiatan.replace(/\s+/g, '_')}_${new Date().toISOString().split('T')[0]}.pdf`);
   };
@@ -996,6 +1070,8 @@ export default function AdminPanel() {
                               <SelectItem value="Produksi">Produksi</SelectItem>
                               <SelectItem value="Neraca">Neraca</SelectItem>
                               <SelectItem value="POTIK">POTIK</SelectItem>
+                              <SelectItem value="Umum">Umum</SelectItem>
+                              <SelectItem value="UKK">UKK</SelectItem>
                             </SelectContent>
                           </Select>
                         </div>
@@ -1287,7 +1363,8 @@ export default function AdminPanel() {
                                     tanggal: jadwal.tanggal,
                                     hari: hari,
                                     // Use 'BPS Kota Surabaya' as default tempat if none is specified
-                                    tempat: 'BPS Kota Surabaya' 
+                                    tempat: 'BPS Kota Surabaya',
+                                    waktu: `${jadwal.jamMulai?.replace(':', '.') || '00.00'} - Selesai`
                                   });
                                 }
                               }}
@@ -1344,6 +1421,16 @@ export default function AdminPanel() {
                               id="tempat"
                               placeholder="Contoh: Aula BPS Kota Surabaya"
                               value={exportForm.tempat}
+                              readOnly
+                              className="bg-slate-100 border-gray-300 text-slate-600 cursor-not-allowed"
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label htmlFor="waktu">Waktu <span className="text-red-500">*</span></Label>
+                            <Input
+                              id="waktu"
+                              placeholder="Otomatis"
+                              value={exportForm.waktu}
                               readOnly
                               className="bg-slate-100 border-gray-300 text-slate-600 cursor-not-allowed"
                             />

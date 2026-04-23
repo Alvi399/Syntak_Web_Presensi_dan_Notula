@@ -130,7 +130,7 @@ class DataService {
       return result;
     } catch (error: any) {
       console.error('Update profile error:', error);
-      return { success: false, message: error.response?.data?.message || 'Gagal memperbarui profil' };
+      return { success: false, message: error.message || 'Gagal memperbarui profil' };
     }
   }
 
@@ -176,7 +176,7 @@ class DataService {
       return response;
     } catch (error: any) {
       console.error('Save absensi error:', error);
-      return { success: false, message: error.response?.data?.message || 'Gagal menyimpan presensi' };
+      return { success: false, message: error.message || 'Gagal menyimpan presensi' };
     }
   }
 
@@ -249,7 +249,7 @@ class DataService {
       });
     } catch (error: any) {
       console.error('Save guest absensi error:', error);
-      return { success: false, message: error.response?.data?.message || 'Gagal menyimpan presensi tamu' };
+      return { success: false, message: error.message || 'Gagal menyimpan presensi tamu' };
     }
   }
 
@@ -415,7 +415,7 @@ class DataService {
       return result;
     } catch (error: any) {
       console.error('Generate QR error:', error);
-      return { success: false, message: error.response?.data?.message || 'Gagal generate QR' };
+      return { success: false, message: error.message || 'Gagal generate QR' };
     }
   }
 
@@ -456,8 +456,19 @@ class DataService {
       const currentUser = authService.getCurrentUser();
       if (!currentUser) return false;
 
+      // Pastikan field `isi` tidak null (backend NOT NULL constraint).
+      // Gabungkan ringkasan + diskusi + tanya_jawab + kesimpulan sebagai fallback.
+      const parts: string[] = [];
+      if (data.ringkasan)   parts.push(`Ringkasan:\n${data.ringkasan}`);
+      if (data.diskusi)     parts.push(`Diskusi:\n${data.diskusi}`);
+      if (data.tanya_jawab) parts.push(`Tanya Jawab:\n${data.tanya_jawab}`);
+      if (data.kesimpulan)  parts.push(`Kesimpulan:\n${data.kesimpulan}`);
+
+      const generatedIsi = parts.length > 0 ? parts.join('\n\n') : '-';
+
       await apiClient.post('/notulensi', {
         ...data,
+        isi: data.isi || generatedIsi,
         userId: currentUser.id,
         namaUser: currentUser.nama
       });
@@ -496,7 +507,7 @@ class DataService {
       return await apiClient.post<{ success: boolean; message: string }>(`/notulensi/${id}/broadcast`);
     } catch (error: any) {
       console.error('Broadcast error:', error);
-      return { success: false, message: error.response?.data?.message || 'Gagal broadcast notula' };
+      return { success: false, message: error.message || 'Gagal broadcast notula' };
     }
   }
 
@@ -578,7 +589,7 @@ class DataService {
       });
     } catch (error: any) {
       console.error('Save jadwal rapat error:', error);
-      return { success: false, message: error.response?.data?.message || 'Gagal menyimpan jadwal' };
+      return { success: false, message: error.message || 'Gagal menyimpan jadwal' };
     }
   }
 

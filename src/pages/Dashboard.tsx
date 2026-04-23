@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useDataSync } from '@/hooks/useDataSync';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -68,7 +69,9 @@ export default function Dashboard() {
     loadDashboardData();
   }, []);
 
-  const loadDashboardData = async () => {
+  useDataSync(['all'], loadDashboardData);
+
+  async function loadDashboardData() {
     try {
       // Load all data with async/await
       const [absensi, notulensi, activities, dailyByCategory, monthlyByActivity] = await Promise.all([
@@ -100,9 +103,9 @@ export default function Dashboard() {
     } catch (error) {
       console.error('Error loading dashboard data:', error);
     }
-  };
+  }
 
-  const generateTodayAttendanceData = async () => {
+  async function generateTodayAttendanceData() {
     const todayAbsensi = await dataService.getAbsensiTodayNonGuest();
     const users = await authService.getAllUsersForAdmin();
     
@@ -120,9 +123,9 @@ export default function Dashboard() {
       { kategori: 'Pegawai', jumlah: pegawaiCount },
       { kategori: 'Magang', jumlah: magangCount }
     ]);
-  };
+  }
 
-  const calculateAttendancePercentage = async () => {
+  async function calculateAttendancePercentage() {
     const todayAbsensi = await dataService.getAbsensiTodayNonGuest();
     const allUsers = await authService.getAllUsersForAdmin();
     const nonAdminUsers = allUsers.filter(u => u.role !== 'admin');
@@ -141,9 +144,9 @@ export default function Dashboard() {
     const percentage = (uniqueAttendees.size / totalUsers) * 100;
     
     setAttendancePercentage(Math.round(percentage));
-  };
+  }
 
-  const generateMonthlyActivityData = async () => {
+  async function generateMonthlyActivityData() {
     const last5Months = getLast5MonthsData();
     const allAbsensi = await dataService.getAbsensiList();
     
@@ -183,7 +186,7 @@ export default function Dashboard() {
     });
     
     setMonthlyActivityData(monthlyData);
-  };
+  }
 
   const formatTime = (timeString: string) => {
     try {
