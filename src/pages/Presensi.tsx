@@ -13,8 +13,10 @@ import { CheckCircle, Clock, Users, Calendar, QrCode as QrIcon, Share2, Trending
 import QRCode from 'react-qr-code';
 import { authService } from '@/lib/authService';
 import { dataService, type JadwalRapat } from '@/lib/dataService';
+import { PageLoader } from '@/components/ui/spinner';
 
 export default function Presensi() {
+  const [isInitialLoad, setIsInitialLoad] = useState(true);
   const [selectedKegiatan, setSelectedKegiatan] = useState('');
   const [namaKegiatan, setNamaKegiatan] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -75,15 +77,17 @@ export default function Presensi() {
     : [];
 
   useEffect(() => {
-    loadTodayData();
-    loadHistoryData();
-    loadActiveJadwal();
-    if (currentUser) {
-      checkUserBlockStatus();
-      if (currentUser.role === 'admin') {
-        checkActiveQR();
-      }
-    }
+    const loadAll = async () => {
+      await Promise.all([
+        loadTodayData(),
+        loadHistoryData(),
+        loadActiveJadwal(),
+        currentUser ? checkUserBlockStatus() : Promise.resolve(),
+        (currentUser && currentUser.role === 'admin') ? checkActiveQR() : Promise.resolve()
+      ]);
+      setIsInitialLoad(false);
+    };
+    loadAll();
   }, [currentUser]);
 
   useDataSync(['all'], () => {
@@ -148,11 +152,6 @@ export default function Presensi() {
     setTodayAbsensi(today);
   };
 
-  const compareDates = (itemDate: string, filterDate: string): boolean => {
-    if (!filterDate) return true;
-    return itemDate === filterDate;
-  };
-
   const formatDateDisplay = (dateString: string) => {
     try {
       const [year, month, day] = dateString.split('-');
@@ -164,9 +163,9 @@ export default function Presensi() {
 
   const loadHistoryData = async () => {
     if (currentUser) {
-      const userHistory = await dataService.getAbsensiList(currentUser.id);
-      const filteredHistory = userHistory.filter(a => compareDates(a.tanggal, filterDate));
-      setUserAbsensiHistory(filteredHistory);
+      const effectiveDate = filterDate || new Date().toISOString().split('T')[0];
+      const userHistory = await dataService.getAbsensiList(currentUser.id, effectiveDate);
+      setUserAbsensiHistory(userHistory);
     }
   };
 
@@ -468,6 +467,8 @@ export default function Presensi() {
       hour: '2-digit', minute: '2-digit'
     });
   };
+
+  if (isInitialLoad) return <PageLoader text="Memuat data presensi..." className="min-h-[80vh]" />;
 
   return (
     <div className="space-y-6">
@@ -862,9 +863,10 @@ export default function Presensi() {
                             ))}
                           </div>
 
-                          {/* Sub-options for 'Semua' */}
-                          {jadwalForm.peserta.includes('Semua') && (
+                          {/* Visibilitas mode: tampil untuk semua pilihan peserta */}
+                          {jadwalForm.peserta.length > 0 && (
                             <div className="mt-2 p-2 bg-indigo-50/50 rounded-md border border-indigo-100 flex items-center gap-4">
+                              <span className="text-[10px] font-semibold text-indigo-800 mr-1">Mode:</span>
                               <label className="flex items-center gap-2 cursor-pointer">
                                 <input
                                   type="radio"
@@ -873,7 +875,7 @@ export default function Presensi() {
                                   onChange={() => setJadwalForm(prev => ({ ...prev, pesertaMode: 'publik' }))}
                                   className="w-3 h-3 text-indigo-600"
                                 />
-                                <span className="text-[10px] font-medium text-indigo-900">Publik (Termasuk Tamu)</span>
+                                <span className="text-[10px] font-medium text-indigo-900">🌐 Publik (Termasuk Tamu)</span>
                               </label>
                               <label className="flex items-center gap-2 cursor-pointer">
                                 <input
@@ -883,7 +885,7 @@ export default function Presensi() {
                                   onChange={() => setJadwalForm(prev => ({ ...prev, pesertaMode: 'akun' }))}
                                   className="w-3 h-3 text-indigo-600"
                                 />
-                                <span className="text-[10px] font-medium text-indigo-900">Akun Syntak Saja</span>
+                                <span className="text-[10px] font-medium text-indigo-900">🔒 Akun Syntak Saja</span>
                               </label>
                             </div>
                           )}

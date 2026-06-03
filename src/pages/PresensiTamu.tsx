@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
@@ -7,6 +7,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { CheckCircle, AlertCircle, Users, UserCircle, Mail, MapPin } from 'lucide-react';
 import { dataService } from '@/lib/dataService';
 import { authService } from '@/lib/authService';
+import { PageLoader } from '@/components/ui/spinner';
 
 const TARGET_LAT = -7.3283539;
 const TARGET_LNG = 112.7283419;
@@ -54,6 +55,13 @@ export default function PresensiTamu({ qrId }: PresensiTamuProps) {
 
   useEffect(() => {
     loadQRData();
+    // Auto-detect Syntak login on mount
+    const loggedInUser = authService.getCurrentUser();
+    if (loggedInUser) {
+      setCurrentUser(loggedInUser);
+      setIsLoggedIn(true);
+      setMode('syntak');
+    }
   }, [qrId]);
 
   useEffect(() => {
@@ -71,55 +79,86 @@ export default function PresensiTamu({ qrId }: PresensiTamuProps) {
     }
   }, [mode, isLoggedIn, qrData]);
 
-  useEffect(() => {
-    const isReadyForSignature = (mode === 'syntak' && isLoggedIn) || mode === 'guest';
-    if (isReadyForSignature && locationStatus === 'idle') {
-      verifyLocation();
-    }
-  }, [mode, isLoggedIn, locationStatus]);
-
-  const verifyLocation = () => {
+  const verifyLocation = useCallback(() => {
+    // Cek apakah browser mendukung Geolocation
     if (!navigator.geolocation) {
       setLocationStatus('error');
-      setLocationError('Browser Anda tidak mendukung Geolocation.');
+      setLocationError('Browser Anda tidak mendukung fitur Geolocation. Gunakan Chrome/Firefox terbaru.');
+      return;
+    }
+
+    // Cek non-secure origin (HTTP bukan localhost)
+    const isSecure = window.isSecureContext ||
+      window.location.protocol === 'https:' ||
+      window.location.hostname === 'localhost' ||
+      window.location.hostname === '127.0.0.1';
+
+    if (!isSecure) {
+      setLocationStatus('error');
+      setLocationError('Deteksi lokasi memerlukan koneksi HTTPS. Hubungi admin IT untuk mengaktifkan HTTPS.');
       return;
     }
 
     setLocationStatus('checking');
-    
+    setLocationError('');
+
+    const onSuccess = (position: GeolocationPosition) => {
+      const { latitude, longitude } = position.coords;
+      const d = calculateDistance(latitude, longitude, TARGET_LAT, TARGET_LNG);
+      setDistance(Math.round(d));
+      if (d <= MAX_RADIUS_METERS) {
+        setLocationStatus('valid');
+      } else {
+        setLocationStatus('invalid');
+        setLocationError(`Anda berada di luar area kantor (Jarak: ${Math.round(d)}m dari BPS). Pastikan Anda berada di dalam gedung.`);
+      }
+    };
+
+    const onError = (error: GeolocationPositionError) => {
+      // Percobaan ke-2: coba dengan low-accuracy jika high-accuracy gagal
+      navigator.geolocation.getCurrentPosition(
+        onSuccess,
+        (secondError) => {
+          setLocationStatus('error');
+          switch (secondError.code) {
+            case secondError.PERMISSION_DENIED:
+              setLocationError(
+                'Akses lokasi ditolak. Buka pengaturan browser → Situs → izinkan Lokasi untuk halaman ini, lalu tekan "Coba Lagi".',
+              );
+              break;
+            case secondError.POSITION_UNAVAILABLE:
+              setLocationError(
+                'Posisi tidak tersedia. Pastikan GPS/WiFi aktif, atau coba dari perangkat yang berbeda.',
+              );
+              break;
+            case secondError.TIMEOUT:
+              setLocationError(
+                'Waktu deteksi habis. Pastikan sinyal GPS/WiFi stabil, lalu tekan "Coba Lagi".',
+              );
+              break;
+            default:
+              setLocationError(`Gagal membaca lokasi (kode: ${secondError.code}). Coba tekan "Coba Lagi".`);
+          }
+        },
+        // Percobaan ke-2: tanpa GPS hardware (Wi-Fi/cell tower saja, jauh lebih cepat)
+        { enableHighAccuracy: false, timeout: 20_000, maximumAge: 30_000 },
+      );
+
+      // Log error percobaan pertama untuk debugging
+      console.warn('[GPS] High-accuracy attempt failed:', error.message, '— retrying with low accuracy...');
+    };
+
+    // Percobaan ke-1: high accuracy dengan cache 30 detik agar tidak terlalu lambat
     navigator.geolocation.getCurrentPosition(
-      (position) => {
-        const { latitude, longitude } = position.coords;
-        const d = calculateDistance(latitude, longitude, TARGET_LAT, TARGET_LNG);
-        setDistance(Math.round(d));
-        
-        if (d <= MAX_RADIUS_METERS) {
-          setLocationStatus('valid');
-        } else {
-          setLocationStatus('invalid');
-          setLocationError(`Anda berada di luar area kantor (Jarak: ${Math.round(d)} meter).`);
-        }
-      },
-      (error) => {
-        setLocationStatus('error');
-        switch(error.code) {
-          case error.PERMISSION_DENIED:
-            setLocationError('Akses lokasi ditolak. Harap izinkan akses lokasi di browser untuk absen.');
-            break;
-          case error.POSITION_UNAVAILABLE:
-            setLocationError('Informasi lokasi tidak tersedia pada perangkat Anda.');
-            break;
-          case error.TIMEOUT:
-            setLocationError('Waktu permintaan lokasi habis. Coba sedikit ke ruang terbuka.');
-            break;
-          default:
-            setLocationError('Terjadi kesalahan saat mengambil lokasi.');
-            break;
-        }
-      },
-      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+      onSuccess,
+      onError,
+      { enableHighAccuracy: true, timeout: 15_000, maximumAge: 30_000 },
     );
-  };
+  }, []);
+
+  // Menghapus useEffect auto-trigger location agar browser
+  // tidak nge-block request GPS karena tidak ada user gesture.
+  // Location check sekarang dieksekusi secara manual via tombol.
 
   const loadQRData = async () => {
     setIsLoading(true);
@@ -260,7 +299,7 @@ export default function PresensiTamu({ qrId }: PresensiTamuProps) {
     'rapat': 'Rapat', 'doa-bersama': 'Doa Bersama', 'sharing-knowledge': 'Sharing Knowledge'
   };
 
-  if (isLoading) return <div className="min-h-screen flex items-center justify-center">Memuat...</div>;
+  if (isLoading) return <PageLoader text="Memuat data QR..." className="min-h-screen" />;
   if (!qrData) return <div className="min-h-screen flex items-center justify-center p-4"><Card className="p-6 text-center">QR Code Tidak Valid</Card></div>;
 
   return (
@@ -333,28 +372,67 @@ export default function PresensiTamu({ qrId }: PresensiTamuProps) {
 
                   <div className={`p-4 rounded-xl border-2 flex items-start gap-4 transition-all ${
                     locationStatus === 'checking' ? 'bg-blue-50 border-blue-200 shadow-inner' :
-                    locationStatus === 'valid' ? 'bg-green-50 border-green-200' :
-                    (locationStatus === 'invalid' || locationStatus === 'error') ? 'bg-amber-50 border-amber-200' : 'hidden'
+                    locationStatus === 'valid'    ? 'bg-green-50 border-green-200' :
+                    locationStatus === 'invalid'  ? 'bg-amber-50 border-amber-200' :
+                    locationStatus === 'error'    ? 'bg-red-50 border-red-200' :
+                    /* idle */ 'bg-slate-50 border-slate-200'
                   }`}>
                     <MapPin className={`w-6 h-6 mt-0.5 flex-shrink-0 ${
                       locationStatus === 'checking' ? 'text-blue-500 animate-bounce' :
-                      locationStatus === 'valid' ? 'text-green-500' :
-                      (locationStatus === 'invalid' || locationStatus === 'error') ? 'text-amber-500' : ''
+                      locationStatus === 'idle' ? 'text-slate-500' :
+                      locationStatus === 'valid'    ? 'text-green-500' :
+                      locationStatus === 'invalid'  ? 'text-amber-500' :
+                      'text-red-500'
                     }`} />
                     <div className="flex-1">
-                      <p className="text-sm font-bold text-gray-800">
-                        {locationStatus === 'checking' && 'Memverifikasi Lokasi...'}
-                        {locationStatus === 'valid' && 'Lokasi Anda Tervalidasi'}
-                        {locationStatus === 'invalid' && 'Lokasi Tidak Valid'}
-                        {locationStatus === 'error' && 'Gagal Membaca Lokasi'}
+                      <p className="text-sm font-bold text-gray-800 flex items-center gap-2">
+                        {locationStatus === 'checking' && (
+                          <>
+                            <span className="inline-block w-3 h-3 rounded-full bg-blue-400 animate-ping" />
+                            Memverifikasi Lokasi...
+                          </>
+                        )}
+                        {locationStatus === 'idle' && 'Akses Lokasi (GPS) Diperlukan'}
+                        {locationStatus === 'valid'   && '✅ Lokasi Anda Tervalidasi'}
+                        {locationStatus === 'invalid' && '⚠️ Di Luar Area Kantor'}
+                        {locationStatus === 'error'   && '❌ Gagal Membaca Lokasi'}
                       </p>
                       <p className="text-xs text-gray-600 mt-1">
-                        {locationStatus === 'checking' && 'Mohon tunggu, memastikan Anda berada di dalam area BPS Kota Surabaya.'}
-                        {locationStatus === 'valid' && `Anda berada di area kantor (Jarak: ${distance}m).`}
+                        {locationStatus === 'checking' &&
+                          'Mohon tunggu — mencoba GPS, lalu Wi-Fi / jaringan sebagai cadangan...'}
+                        {locationStatus === 'idle' &&
+                          'Sistem harus memverifikasi lokasi Anda. Mohon izinkan akses GPS saat ditanya.'}
+                        {locationStatus === 'valid' &&
+                          `Anda berada di area kantor (Jarak: ${distance}m).`}
                         {(locationStatus === 'invalid' || locationStatus === 'error') && locationError}
                       </p>
+                      {locationStatus === 'idle' && (
+                        <Button
+                          variant="default"
+                          size="sm"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            verifyLocation();
+                          }}
+                          className="mt-3 text-xs bg-blue-600 hover:bg-blue-700 h-8"
+                        >
+                          📍 Izinkan & Cek Lokasi Sekarang
+                        </Button>
+                      )}
                       {(locationStatus === 'invalid' || locationStatus === 'error') && (
-                        <Button variant="outline" size="sm" onClick={verifyLocation} className="mt-3 text-xs bg-white h-7">Deteksi Ulang Lokasi</Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            setLocationStatus('idle');
+                            setLocationError('');
+                            setDistance(null);
+                          }}
+                          className="mt-3 text-xs bg-white h-7"
+                        >
+                          🔄 Coba Lagi
+                        </Button>
                       )}
                     </div>
                   </div>

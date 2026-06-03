@@ -47,7 +47,7 @@ export default function Notula() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const currentUser = authService.getCurrentUser();
   const [searchQuery, setSearchQuery] = useState('');
-  const [dateFilter, setDateFilter] = useState('');
+  const [dateFilter, setDateFilter] = useState(new Date().toISOString().split('T')[0]);
   const [activeJadwal, setActiveJadwal] = useState<any[]>([]);
   
   const jenisKegiatan = [
@@ -81,8 +81,13 @@ export default function Notula() {
     }
   }, [isDialogOpen, formData.signature]);
 
+  useEffect(() => {
+    loadNotulensi();
+  }, [dateFilter]);
+
   const loadNotulensi = async () => {
-    const data = await dataService.getNotulensiList();
+    const effectiveDate = dateFilter || new Date().toISOString().split('T')[0];
+    const data = await dataService.getNotulensiList(effectiveDate);
     setNotulensiList(data);
   };
 
@@ -311,8 +316,7 @@ export default function Notula() {
   };
 
   const filteredList = notulensiList.filter(n => 
-    n.judul.toLowerCase().includes(searchQuery.toLowerCase()) &&
-    (dateFilter === '' || n.tanggal === dateFilter)
+    n.judul.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
   return (

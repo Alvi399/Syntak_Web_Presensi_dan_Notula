@@ -926,20 +926,58 @@ app.post('/api/auth/users/:id/unblock', async (req, res) => {
 // Get activities
 app.get('/api/auth/activities', async (req, res) => {
   try {
-    const [activities] = await pool.execute(
-      'SELECT * FROM activity_logs ORDER BY created_at DESC LIMIT 100'
-    );
+    const { page, limit } = req.query;
 
-    const formatted = activities.map(activity => ({
-      id: activity.id,
-      userId: activity.user_id,
-      namaUser: activity.nama_user,
-      aktivitas: activity.aktivitas,
-      tanggal: new Date(activity.tanggal).toLocaleDateString('id-ID'),
-      waktu: activity.waktu
-    }));
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const isPaginated = !isNaN(pageNum) && !isNaN(limitNum) && pageNum > 0 && limitNum > 0;
 
-    res.json(formatted);
+    let baseQuery = " FROM activity_logs";
+    const params = [];
+
+    if (isPaginated) {
+      const countQuery = `SELECT COUNT(id) as total${baseQuery}`;
+      const [countResult] = await executeWithRetry(countQuery, params);
+      const total = countResult[0].total;
+
+      let selectQuery = `SELECT *${baseQuery} ORDER BY created_at DESC LIMIT ? OFFSET ?`;
+      const selectParams = [limitNum, (pageNum - 1) * limitNum];
+      const [activities] = await executeWithRetry(selectQuery, selectParams);
+
+      const formatted = activities.map(activity => ({
+        id: activity.id,
+        userId: activity.user_id,
+        namaUser: activity.nama_user,
+        aktivitas: activity.aktivitas,
+        tanggal: new Date(activity.tanggal).toLocaleDateString('id-ID'),
+        waktu: activity.waktu
+      }));
+
+      res.json({
+        data: formatted,
+        pagination: {
+          total,
+          page: pageNum,
+          limit: limitNum,
+          totalPages: Math.ceil(total / limitNum)
+        }
+      });
+    } else {
+      const [activities] = await pool.execute(
+        'SELECT * FROM activity_logs ORDER BY created_at DESC LIMIT 100'
+      );
+
+      const formatted = activities.map(activity => ({
+        id: activity.id,
+        userId: activity.user_id,
+        namaUser: activity.nama_user,
+        aktivitas: activity.aktivitas,
+        tanggal: new Date(activity.tanggal).toLocaleDateString('id-ID'),
+        waktu: activity.waktu
+      }));
+
+      res.json(formatted);
+    }
   } catch (error) {
     console.error('Get activities error:', error);
     res.status(500).json({ success: false, message: 'Gagal mengambil activities' });
@@ -1147,27 +1185,147 @@ app.post('/api/absensi/guest', async (req, res) => {
 // Get absensi list
 app.get('/api/absensi', async (req, res) => {
   try {
-    const { today, month, userId } = req.query;
+    const { today, month, userId, page, limit, exclude_heavy, tanggal, jenisKegiatan, kategori, tim, search, idKegiatan } = req.query;
 
-    let query = "SELECT *, DATE_FORMAT(tanggal, '%Y-%m-%d') as tanggal_iso FROM absensi WHERE 1=1";
+    const excludeHeavy = exclude_heavy === 'true';
+    let selectFields = "a.*";
+    if (excludeHeavy) {
+      selectFields = "a.id, a.user_id, a.nama_user, a.jenis_kegiatan, a.nama_kegiatan, a.id_kegiatan, a.tanggal, a.waktu, a.status, a.status_kehadiran, a.instansi, a.email, a.is_guest";
+    }
+
+    let baseQuery = " FROM absensi a LEFT JOIN users u ON a.user_id = u.id WHERE 1=1";
     const params = [];
 
     if (today === 'true') {
-      query += ' AND tanggal = CURDATE()';
+      const nowWIB = getNowWIB();
+      const todayStr = formatDateLocal(nowWIB);
+      baseQuery += ' AND a.tanggal = ?';
+      params.push(todayStr);
     } else if (month === 'true') {
-      query += ' AND YEAR(tanggal) = YEAR(CURDATE()) AND MONTH(tanggal) = MONTH(CURDATE())';
+      const nowWIB = getNowWIB();
+      const todayStr = formatDateLocal(nowWIB);
+      const [year, monthVal] = todayStr.split('-');
+      baseQuery += ' AND YEAR(a.tanggal) = ? AND MONTH(a.tanggal) = ?';
+      params.push(parseInt(year), parseInt(monthVal));
     }
 
     if (userId) {
-      query += ' AND user_id = ?';
+      baseQuery += ' AND a.user_id = ?';
       params.push(userId);
     }
 
-    query += ' ORDER BY created_at DESC';
+    if (idKegiatan) {
+      baseQuery += ' AND a.id_kegiatan = ?';
+      params.push(idKegiatan);
+    }
 
-    const [absensi] = await pool.execute(query, params);
+    if (tanggal) {
+      baseQuery += ' AND a.tanggal = ?';
+      params.push(tanggal);
+    }
 
-    const formatted = absensi.map(item => ({
+    if (jenisKegiatan && jenisKegiatan !== 'all') {
+      baseQuery += ' AND a.jenis_kegiatan = ?';
+      params.push(jenisKegiatan);
+    }
+
+    if (kategori && kategori !== 'all') {
+      if (kategori === 'Tamu') {
+        baseQuery += ' AND a.is_guest = 1';
+      } else {
+        baseQuery += ' AND a.is_guest = 0 AND u.kategori = ?';
+        params.push(kategori);
+      }
+    }
+
+    if (tim && tim !== 'all') {
+      baseQuery += ' AND a.is_guest = 0 AND u.tim = ?';
+      params.push(tim);
+    }
+
+    if (search) {
+      baseQuery += ' AND (a.nama_user LIKE ? OR a.nama_kegiatan LIKE ?)';
+      params.push(`%${search}%`, `%${search}%`);
+    }
+
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const isPaginated = !isNaN(pageNum) && !isNaN(limitNum) && pageNum > 0 && limitNum > 0;
+
+    if (isPaginated) {
+      // Get total count first
+      const countQuery = `SELECT COUNT(a.id) as total${baseQuery}`;
+      const [countResult] = await executeWithRetry(countQuery, params);
+      const total = countResult[0].total;
+
+      // Add order and limit
+      let selectQuery = `SELECT ${selectFields}, DATE_FORMAT(a.tanggal, '%Y-%m-%d') as tanggal_iso${baseQuery} ORDER BY a.created_at DESC LIMIT ? OFFSET ?`;
+      const selectParams = [...params, limitNum, (pageNum - 1) * limitNum];
+
+      const [absensi] = await executeWithRetry(selectQuery, selectParams);
+
+      const formatted = absensi.map(item => ({
+        id: item.id,
+        userId: item.user_id || 'guest',
+        namaUser: item.nama_user,
+        jenisKegiatan: item.jenis_kegiatan,
+        namaKegiatan: item.nama_kegiatan || '',
+        tanggal: item.tanggal_iso,
+        waktu: item.waktu.substring(0, 5),
+        signature: item.signature || null,
+        status: item.status,
+        statusKehadiran: item.status_kehadiran || 'hadir',
+        instansi: item.instansi,
+        isGuest: item.is_guest
+      }));
+
+      res.json({
+        data: formatted,
+        pagination: {
+          total,
+          page: pageNum,
+          limit: limitNum,
+          totalPages: Math.ceil(total / limitNum)
+        }
+      });
+    } else {
+      // Non-paginated query
+      let selectQuery = `SELECT ${selectFields}, DATE_FORMAT(a.tanggal, '%Y-%m-%d') as tanggal_iso${baseQuery} ORDER BY a.created_at DESC`;
+      const [absensi] = await executeWithRetry(selectQuery, params);
+
+      const formatted = absensi.map(item => ({
+        id: item.id,
+        userId: item.user_id || 'guest',
+        namaUser: item.nama_user,
+        jenisKegiatan: item.jenis_kegiatan,
+        namaKegiatan: item.nama_kegiatan || '',
+        tanggal: item.tanggal_iso,
+        waktu: item.waktu.substring(0, 5),
+        signature: item.signature || null,
+        status: item.status,
+        statusKehadiran: item.status_kehadiran || 'hadir',
+        instansi: item.instansi,
+        isGuest: item.is_guest
+      }));
+
+      res.json(formatted);
+    }
+  } catch (error) {
+    console.error('Get absensi error:', error);
+    res.status(500).json({ success: false, message: 'Gagal mengambil data absensi' });
+  }
+});
+
+// Get single absensi details
+app.get('/api/absensi/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const [rows] = await executeWithRetry("SELECT *, DATE_FORMAT(tanggal, '%Y-%m-%d') as tanggal_iso FROM absensi WHERE id = ?", [id]);
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Data absensi tidak ditemukan' });
+    }
+    const item = rows[0];
+    res.json({
       id: item.id,
       userId: item.user_id || 'guest',
       namaUser: item.nama_user,
@@ -1180,12 +1338,10 @@ app.get('/api/absensi', async (req, res) => {
       statusKehadiran: item.status_kehadiran || 'hadir',
       instansi: item.instansi,
       isGuest: item.is_guest
-    }));
-
-    res.json(formatted);
+    });
   } catch (error) {
-    console.error('Get absensi error:', error);
-    res.status(500).json({ success: false, message: 'Gagal mengambil data absensi' });
+    console.error('Get single absensi error:', error);
+    res.status(500).json({ success: false, message: 'Gagal mengambil detail absensi' });
   }
 });
 
@@ -1251,22 +1407,128 @@ app.post('/api/notulensi', async (req, res) => {
 // Get notulensi list
 app.get('/api/notulensi', async (req, res) => {
   try {
-    const { today, month } = req.query;
+    const { today, month, page, limit, exclude_heavy, search, jenisKegiatan, tanggal } = req.query;
 
-    let query = "SELECT *, DATE_FORMAT(tanggal, '%Y-%m-%d') as tanggal_iso FROM notulensi WHERE 1=1";
+    const excludeHeavy = exclude_heavy === 'true';
+    let selectFields = "*";
+    if (excludeHeavy) {
+      selectFields = "id, user_id, nama_user, judul, jenis_kegiatan, id_kegiatan, ringkasan, diskusi, kesimpulan, tanya_jawab, isi, tanggal, waktu, hari, jam, tempat, agenda, pemandu, CASE WHEN foto IS NOT NULL AND foto != '' THEN 1 ELSE 0 END as has_foto, CASE WHEN signature IS NOT NULL AND signature != '' THEN 1 ELSE 0 END as has_signature";
+    }
+
+    let baseQuery = " FROM notulensi WHERE 1=1";
     const params = [];
 
     if (today === 'true') {
-      query += ' AND tanggal = CURDATE()';
+      baseQuery += ' AND tanggal = CURDATE()';
     } else if (month === 'true') {
-      query += ' AND YEAR(tanggal) = YEAR(CURDATE()) AND MONTH(tanggal) = MONTH(CURDATE())';
+      baseQuery += ' AND YEAR(tanggal) = YEAR(CURDATE()) AND MONTH(tanggal) = MONTH(CURDATE())';
     }
 
-    query += ' ORDER BY created_at DESC';
+    if (tanggal) {
+      baseQuery += ' AND tanggal = ?';
+      params.push(tanggal);
+    }
 
-    const [notulensi] = await executeWithRetry(query, params);
+    if (jenisKegiatan && jenisKegiatan !== 'all') {
+      baseQuery += ' AND jenis_kegiatan = ?';
+      params.push(jenisKegiatan);
+    }
 
-    const formatted = notulensi.map(item => ({
+    if (search) {
+      baseQuery += ' AND (judul LIKE ? OR isi LIKE ? OR nama_user LIKE ?)';
+      params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+    }
+
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const isPaginated = !isNaN(pageNum) && !isNaN(limitNum) && pageNum > 0 && limitNum > 0;
+
+    if (isPaginated) {
+      const countQuery = `SELECT COUNT(id) as total${baseQuery}`;
+      const [countResult] = await executeWithRetry(countQuery, params);
+      const total = countResult[0].total;
+
+      let selectQuery = `SELECT ${selectFields}, DATE_FORMAT(tanggal, '%Y-%m-%d') as tanggal_iso${baseQuery} ORDER BY created_at DESC LIMIT ? OFFSET ?`;
+      const selectParams = [...params, limitNum, (pageNum - 1) * limitNum];
+      const [notulensi] = await executeWithRetry(selectQuery, selectParams);
+
+      const formatted = notulensi.map(item => ({
+        id: item.id,
+        userId: item.user_id,
+        namaUser: item.nama_user,
+        judul: item.judul,
+        jenisKegiatan: item.jenis_kegiatan,
+        idKegiatan: item.id_kegiatan,
+        ringkasan: item.ringkasan,
+        diskusi: item.diskusi,
+        kesimpulan: item.kesimpulan,
+        tanya_jawab: item.tanya_jawab,
+        isi: item.isi,
+        tanggal: item.tanggal_iso,
+        waktu: item.waktu.substring(0, 5),
+        foto: excludeHeavy ? (item.has_foto ? 'present' : null) : item.foto,
+        hari: item.hari,
+        jam: item.jam,
+        tempat: item.tempat,
+        agenda: item.agenda,
+        signature: excludeHeavy ? (item.has_signature ? 'present' : null) : item.signature,
+        pemandu: item.pemandu
+      }));
+
+      res.json({
+        data: formatted,
+        pagination: {
+          total,
+          page: pageNum,
+          limit: limitNum,
+          totalPages: Math.ceil(total / limitNum)
+        }
+      });
+    } else {
+      let selectQuery = `SELECT ${selectFields}, DATE_FORMAT(tanggal, '%Y-%m-%d') as tanggal_iso${baseQuery} ORDER BY created_at DESC`;
+      const [notulensi] = await executeWithRetry(selectQuery, params);
+
+      const formatted = notulensi.map(item => ({
+        id: item.id,
+        userId: item.user_id,
+        namaUser: item.nama_user,
+        judul: item.judul,
+        jenisKegiatan: item.jenis_kegiatan,
+        idKegiatan: item.id_kegiatan,
+        ringkasan: item.ringkasan,
+        diskusi: item.diskusi,
+        kesimpulan: item.kesimpulan,
+        tanya_jawab: item.tanya_jawab,
+        isi: item.isi,
+        tanggal: item.tanggal_iso,
+        waktu: item.waktu.substring(0, 5),
+        foto: excludeHeavy ? (item.has_foto ? 'present' : null) : item.foto,
+        hari: item.hari,
+        jam: item.jam,
+        tempat: item.tempat,
+        agenda: item.agenda,
+        signature: excludeHeavy ? (item.has_signature ? 'present' : null) : item.signature,
+        pemandu: item.pemandu
+      }));
+
+      res.json(formatted);
+    }
+  } catch (error) {
+    console.error('Get notulensi error:', error);
+    res.status(500).json({ success: false, message: 'Gagal mengambil data notulensi' });
+  }
+});
+
+// Get single notulensi details
+app.get('/api/notulensi/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const [rows] = await executeWithRetry("SELECT *, DATE_FORMAT(tanggal, '%Y-%m-%d') as tanggal_iso FROM notulensi WHERE id = ?", [id]);
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Data notulensi tidak ditemukan' });
+    }
+    const item = rows[0];
+    res.json({
       id: item.id,
       userId: item.user_id,
       namaUser: item.nama_user,
@@ -1287,12 +1549,10 @@ app.get('/api/notulensi', async (req, res) => {
       agenda: item.agenda,
       signature: item.signature,
       pemandu: item.pemandu
-    }));
-
-    res.json(formatted);
+    });
   } catch (error) {
-    console.error('Get notulensi error:', error);
-    res.status(500).json({ success: false, message: 'Gagal mengambil data notulensi' });
+    console.error('Get single notulensi error:', error);
+    res.status(500).json({ success: false, message: 'Gagal mengambil detail notulensi' });
   }
 });
 
@@ -1470,11 +1730,125 @@ app.post('/api/undangan', async (req, res) => {
 // Get undangan list
 app.get('/api/undangan', async (req, res) => {
   try {
-    const [undangan] = await pool.execute(
-      'SELECT * FROM undangan ORDER BY created_at DESC'
-    );
+    const { page, limit, exclude_heavy, search, tanggal } = req.query;
 
-    const formatted = undangan.map(item => ({
+    const excludeHeavy = exclude_heavy === 'true';
+    let selectFields = "*";
+    if (excludeHeavy) {
+      selectFields = "id, user_id, nama_user, id_kegiatan, tempat, tanggal, nomor_surat, sifat, lampiran, perihal, kepada, isi_surat, hari_tanggal_waktu, tempat_kegiatan, tanda_tangan, jabatan_penandatangan, nip, created_at, isi_penutup, is_uploaded_file, uploaded_file_name, uploaded_file_type, uploaded_file_size";
+    }
+
+    let baseQuery = " FROM undangan WHERE 1=1";
+    const params = [];
+
+    if (search) {
+      baseQuery += ' AND (perihal LIKE ? OR nomor_surat LIKE ? OR kepada LIKE ?)';
+      params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+    }
+
+    if (tanggal) {
+      baseQuery += ' AND DATE(created_at) = ?';
+      params.push(tanggal);
+    }
+
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const isPaginated = !isNaN(pageNum) && !isNaN(limitNum) && pageNum > 0 && limitNum > 0;
+
+    if (isPaginated) {
+      const countQuery = `SELECT COUNT(id) as total${baseQuery}`;
+      const [countResult] = await executeWithRetry(countQuery, params);
+      const total = countResult[0].total;
+
+      let selectQuery = `SELECT ${selectFields}${baseQuery} ORDER BY created_at DESC LIMIT ? OFFSET ?`;
+      const selectParams = [...params, limitNum, (pageNum - 1) * limitNum];
+      const [undangan] = await executeWithRetry(selectQuery, selectParams);
+
+      const formatted = undangan.map(item => ({
+        id: item.id,
+        userId: item.user_id,
+        namaUser: item.nama_user,
+        idKegiatan: item.id_kegiatan,
+        tempat: item.tempat,
+        tanggal: item.tanggal,
+        nomorSurat: item.nomor_surat,
+        sifat: item.sifat,
+        lampiran: item.lampiran,
+        perihal: item.perihal,
+        kepada: item.kepada,
+        isiSurat: item.isi_surat,
+        hariTanggalWaktu: item.hari_tanggal_waktu,
+        tempatKegiatan: item.tempat_kegiatan,
+        tandaTangan: item.tanda_tangan,
+        jabatanPenandatangan: item.jabatan_penandatangan,
+        nip: item.nip,
+        createdAt: item.created_at,
+        isiPenutup: item.isi_penutup,
+        isUploadedFile: item.is_uploaded_file,
+        uploadedFileName: item.uploaded_file_name,
+        uploadedFileType: item.uploaded_file_type,
+        uploadedFileData: excludeHeavy ? null : item.uploaded_file_data,
+        uploadedFileSize: item.uploaded_file_size
+      }));
+
+      res.json({
+        data: formatted,
+        pagination: {
+          total,
+          page: pageNum,
+          limit: limitNum,
+          totalPages: Math.ceil(total / limitNum)
+        }
+      });
+    } else {
+      let selectQuery = `SELECT ${selectFields}${baseQuery} ORDER BY created_at DESC`;
+      const [undangan] = await executeWithRetry(selectQuery, params);
+
+      const formatted = undangan.map(item => ({
+        id: item.id,
+        userId: item.user_id,
+        namaUser: item.nama_user,
+        idKegiatan: item.id_kegiatan,
+        tempat: item.tempat,
+        tanggal: item.tanggal,
+        nomorSurat: item.nomor_surat,
+        sifat: item.sifat,
+        lampiran: item.lampiran,
+        perihal: item.perihal,
+        kepada: item.kepada,
+        isiSurat: item.isi_surat,
+        hariTanggalWaktu: item.hari_tanggal_waktu,
+        tempatKegiatan: item.tempat_kegiatan,
+        tandaTangan: item.tanda_tangan,
+        jabatanPenandatangan: item.jabatan_penandatangan,
+        nip: item.nip,
+        createdAt: item.created_at,
+        isiPenutup: item.isi_penutup,
+        isUploadedFile: item.is_uploaded_file,
+        uploadedFileName: item.uploaded_file_name,
+        uploadedFileType: item.uploaded_file_type,
+        uploadedFileData: excludeHeavy ? null : item.uploaded_file_data,
+        uploadedFileSize: item.uploaded_file_size
+      }));
+
+      res.json(formatted);
+    }
+  } catch (error) {
+    console.error('Get undangan error:', error);
+    res.status(500).json({ success: false, message: 'Gagal mengambil data undangan' });
+  }
+});
+
+// Get single undangan details
+app.get('/api/undangan/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const [rows] = await executeWithRetry("SELECT * FROM undangan WHERE id = ?", [id]);
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Data undangan tidak ditemukan' });
+    }
+    const item = rows[0];
+    res.json({
       id: item.id,
       userId: item.user_id,
       namaUser: item.nama_user,
@@ -1499,12 +1873,10 @@ app.get('/api/undangan', async (req, res) => {
       uploadedFileType: item.uploaded_file_type,
       uploadedFileData: item.uploaded_file_data,
       uploadedFileSize: item.uploaded_file_size
-    }));
-
-    res.json(formatted);
+    });
   } catch (error) {
-    console.error('Get undangan error:', error);
-    res.status(500).json({ success: false, message: 'Gagal mengambil data undangan' });
+    console.error('Get single undangan error:', error);
+    res.status(500).json({ success: false, message: 'Gagal mengambil detail undangan' });
   }
 });
 

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Toaster } from '@/components/ui/sonner';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { Button } from '@/components/ui/button';
@@ -13,9 +13,11 @@ import {
   Menu,
   X,
   Shield,
-  Mail
+  Mail,
+  AlertTriangle
 } from 'lucide-react';
 import { authService, type User} from '@/lib/authService';
+import { useInactivityLogout } from '@/hooks/useInactivityLogout';
 import Login from '@/pages/Login';
 import Dashboard from '@/pages/Dashboard';
 import Presensi from '@/pages/Presensi';
@@ -35,6 +37,7 @@ const App = () => {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [qrMode, setQrMode] = useState<{ active: boolean; qrId: string }>({ active: false, qrId: '' });
   const [isLoading, setIsLoading] = useState(true);
+  const [showInactivityWarning, setShowInactivityWarning] = useState(false);
 
   const { notifications, broadcastProgress, unreadCount, markRead, markAllRead } = useNotifications();
 
@@ -92,15 +95,24 @@ const App = () => {
     setCurrentUser(user);
   };
 
-  const handleLogout = async () => {
+  const handleLogout = useCallback(async () => {
     try {
-      await authService.logout();
+      authService.logout();
       setCurrentUser(null);
       setCurrentPage('dashboard');
+      setShowInactivityWarning(false);
     } catch (error) {
       console.error('Logout error:', error);
     }
-  };
+  }, []);
+
+  // Auto-logout setelah 1 jam tidak aktif
+  useInactivityLogout({
+    isActive: !!currentUser && !qrMode.active,
+    onLogout: handleLogout,
+    onWarning: () => setShowInactivityWarning(true),
+    onWarningDismiss: () => setShowInactivityWarning(false),
+  });
 
   const menuItems = [
     { id: 'dashboard' as PageType, label: 'Dashboard', icon: LayoutDashboard },
@@ -151,6 +163,24 @@ const App = () => {
         <Login onLoginSuccess={handleLoginSuccess} />
       ) : (
         <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50 flex">
+          {/* Banner peringatan inaktivitas */}
+          {showInactivityWarning && (
+            <div className="fixed top-0 inset-x-0 z-[999] flex items-center justify-between gap-4 bg-amber-500 text-white px-5 py-3 shadow-lg animate-in slide-in-from-top duration-300">
+              <div className="flex items-center gap-3">
+                <AlertTriangle className="w-5 h-5 flex-shrink-0 animate-pulse" />
+                <span className="text-sm font-semibold">
+                  ⚠️ Sesi Anda akan berakhir dalam <strong>2 menit</strong> karena tidak ada aktivitas. Klik di mana saja untuk memperbarui sesi.
+                </span>
+              </div>
+              <Button
+                size="sm"
+                onClick={() => setShowInactivityWarning(false)}
+                className="bg-white text-amber-700 hover:bg-amber-50 font-semibold text-xs shrink-0 h-7 px-3"
+              >
+                Perpanjang Sesi
+              </Button>
+            </div>
+          )}
           {/* Sidebar - FIXED, tidak scroll */}
           <div className={`
             fixed inset-y-0 left-0 z-50 w-72 bg-white shadow-2xl transform transition-transform duration-300 ease-in-out

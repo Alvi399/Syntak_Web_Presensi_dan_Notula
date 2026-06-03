@@ -18,8 +18,8 @@ import {
   Activity, 
   Plus, 
   Edit, 
-  Trash2, 
-  Download, 
+  Trash2, Eye, 
+  Download, Loader2, 
   RefreshCw,
   Shield,
   Calendar,
@@ -42,6 +42,7 @@ import QRCode from 'react-qr-code';
 
 import { authService, type User, type ActivityLog } from '@/lib/authService';
 import { dataService, type AbsensiRecord, type NotulensiRecord, type JadwalRapat } from '@/lib/dataService';
+import { PageLoader } from '@/components/ui/spinner';
 import SignatureCanvas from 'react-signature-canvas';
 import jsPDF from 'jspdf';
 
@@ -51,10 +52,34 @@ type JenisKegiatan = 'senam' | 'apel' | 'rapelan' | 'doa-bersama' | 'rapat' | 's
 type BlockReason = 'izin' | 'sakit' | 'alpa' | 'izin-telat' | '';
 
 export default function AdminPanel() {
+  const [isInitialLoad, setIsInitialLoad] = useState(true);
   const [users, setUsers] = useState<User[]>([]);
   const [activities, setActivities] = useState<ActivityLog[]>([]);
   const [absensiData, setAbsensiData] = useState<AbsensiRecord[]>([]);
   const [notulensiData, setNotulensiData] = useState<NotulensiRecord[]>([]);
+  
+  // Pagination & stats states
+  const [absensiPage, setAbsensiPage] = useState(1);
+  const [absensiTotal, setAbsensiTotal] = useState(0);
+  const [absensiTotalPages, setAbsensiTotalPages] = useState(0);
+  const ABSENSI_PAGE_SIZE = 25;
+
+  const [notulensiPage, setNotulensiPage] = useState(1);
+  const [notulensiTotal, setNotulensiTotal] = useState(0);
+  const [notulensiTotalPages, setNotulensiTotalPages] = useState(0);
+  const NOTULENSI_PAGE_SIZE = 20;
+
+  const [allAbsensiStats, setAllAbsensiStats] = useState<AbsensiRecord[]>([]);
+  const [allNotulensiStats, setAllNotulensiStats] = useState<NotulensiRecord[]>([]);
+  const [isStatsLoading, setIsStatsLoading] = useState(false);
+
+  const [viewingSignature, setViewingSignature] = useState<{ open: boolean; nama: string; signature: string | null }>({
+    open: false,
+    nama: '',
+    signature: null
+  });
+  const [exportData, setExportData] = useState<AbsensiRecord[]>([]);
+
   const [isUserDialogOpen, setIsUserDialogOpen] = useState(false);
   const [isExportDialogOpen, setIsExportDialogOpen] = useState(false);
   const [isSignatureDialogOpen, setIsSignatureDialogOpen] = useState(false);
@@ -74,6 +99,7 @@ export default function AdminPanel() {
     note: ''
   });
   const [exportForm, setExportForm] = useState({
+    jadwalId: '',
     judulKegiatan: '',
     hari: '',
     tanggal: '',
@@ -81,6 +107,7 @@ export default function AdminPanel() {
     waktu: '',
     exportType: 'pdf' as 'pdf' | 'excel'
   });
+  const [isExporting, setIsExporting] = useState(false);
   const [message, setMessage] = useState({ type: '', text: '' });
   const [filterDate, setFilterDate] = useState('');
   const [filterUser, setFilterUser] = useState('');
@@ -96,6 +123,14 @@ export default function AdminPanel() {
 
   // Jadwal Rapat states
   const [jadwalRapatData, setJadwalRapatData] = useState<JadwalRapat[]>([]);
+
+  // Client-side pagination: Users
+  const [userPage, setUserPage] = useState(1);
+  const USER_PAGE_SIZE = 10;
+
+  // Client-side pagination: Jadwal Rapat
+  const [jadwalPage, setJadwalPage] = useState(1);
+  const JADWAL_PAGE_SIZE = 10;
   
   const signaturePadRef = useRef<SignatureCanvas>(null);
   const [adminSignature, setAdminSignature] = useState<string>('');
@@ -115,6 +150,27 @@ export default function AdminPanel() {
   useDataSync(['all'], () => {
     loadAdminData();
   });
+
+  // Watch filters to trigger reloading absensi page 1
+  useEffect(() => {
+    if (!isInitialLoad) {
+      loadAbsensiPage(1);
+    }
+  }, [filterDate, filterKegiatan, filterKategori, filterUser, filterTim, filterNamaKegiatan]);
+
+  // Watch absensiPage to reload absensi
+  useEffect(() => {
+    if (!isInitialLoad) {
+      loadAbsensiPage(absensiPage);
+    }
+  }, [absensiPage]);
+
+  // Watch notulensiPage to reload notulensi
+  useEffect(() => {
+    if (!isInitialLoad) {
+      loadNotulensiPage(notulensiPage);
+    }
+  }, [notulensiPage]);
 
   const checkAndUnblockExpiredUsers = async () => {
     const users = await authService.getAllUsersForAdmin();
@@ -137,39 +193,121 @@ export default function AdminPanel() {
     }
   };
 
-  const loadAdminData = async () => {
-    // Fetch semua data secara paralel — tiap call dibungkus try-catch sendiri
-    // agar satu kegagalan tidak menghalangi update state yang lain
-    const [usersData, activitiesData, absensiList, notulensiList, jadwalList] = await Promise.all([
+  const loadBaseData = async () => {
+    const [usersData, activitiesData, jadwalList] = await Promise.all([
       authService.getAllUsersForAdmin().catch(e => { console.error('loadAdminData: users failed', e); return []; }),
       authService.getActivities().catch(e => { console.error('loadAdminData: activities failed', e); return []; }),
-      dataService.getAbsensiList().catch(e => { console.error('loadAdminData: absensi failed', e); return []; }),
-      dataService.getNotulensiList().catch(e => { console.error('loadAdminData: notulensi failed', e); return []; }),
       dataService.getJadwalRapat().catch(e => { console.error('loadAdminData: jadwal failed', e); return []; })
     ]);
     
     setUsers(usersData);
     setActivities(activitiesData);
-    setAbsensiData(absensiList);
-    setNotulensiData(notulensiList);
     setJadwalRapatData(jadwalList);
   };
 
+  const loadAbsensiPage = async (page: number) => {
+    try {
+      const result = await dataService.getAbsensiListPaginated({
+        page,
+        limit: ABSENSI_PAGE_SIZE,
+        exclude_heavy: true,
+        tanggal: filterDate || undefined,
+        jenisKegiatan: filterKegiatan !== 'all' ? filterKegiatan : undefined,
+        kategori: filterKategori !== 'all' ? filterKategori : undefined,
+        tim: filterTim !== 'all' ? filterTim : undefined,
+        search: filterNamaKegiatan || undefined,
+        userId: filterUser !== 'all' ? filterUser : undefined
+      });
+      setAbsensiData(result.data);
+      setAbsensiPage(page);
+      setAbsensiTotal(result.pagination.total);
+      setAbsensiTotalPages(result.pagination.totalPages);
+    } catch (e) {
+      console.error('loadAbsensiPage failed', e);
+    }
+  };
+
+  const loadNotulensiPage = async (page: number) => {
+    try {
+      const result = await dataService.getNotulensiListPaginated({
+        page,
+        limit: NOTULENSI_PAGE_SIZE,
+        exclude_heavy: true
+      });
+      setNotulensiData(result.data);
+      setNotulensiPage(page);
+      setNotulensiTotal(result.pagination.total);
+      setNotulensiTotalPages(result.pagination.totalPages);
+    } catch (e) {
+      console.error('loadNotulensiPage failed', e);
+    }
+  };
+
+  const loadStatsData = async () => {
+    setIsStatsLoading(true);
+    try {
+      const [absensiStatsResult, notulensiStatsResult] = await Promise.all([
+        dataService.getAbsensiListPaginated({ page: 1, limit: 999999, exclude_heavy: true }),
+        dataService.getNotulensiListPaginated({ page: 1, limit: 999999, exclude_heavy: true })
+      ]);
+      setAllAbsensiStats(absensiStatsResult.data);
+      setAllNotulensiStats(notulensiStatsResult.data);
+    } catch (e) {
+      console.error('Failed to load stats data', e);
+    } finally {
+      setIsStatsLoading(false);
+    }
+  };
+
+  const loadAdminData = async () => {
+    setIsInitialLoad(true);
+    await Promise.all([
+      loadBaseData(),
+      loadAbsensiPage(1),
+      loadNotulensiPage(1)
+    ]);
+    setIsInitialLoad(false);
+    loadStatsData();
+  };
+
+  const viewAbsensiSignature = async (id: string, nama: string) => {
+    setMessage({ type: 'info', text: 'Memuat tanda tangan...' });
+    const record = await dataService.getAbsensiById(id);
+    setMessage({ type: '', text: '' });
+    if (record && record.signature) {
+      setViewingSignature({
+        open: true,
+        nama,
+        signature: record.signature
+      });
+    } else {
+      setMessage({ type: 'error', text: 'Tanda tangan tidak ditemukan untuk record ini' });
+    }
+  };
+
   const handleDeleteJadwal = async (id: string) => {
-    if (window.confirm('Yakin ingin menghapus jadwal ini?')) {
+    if (window.confirm('Yakin ingin menghapus jadwal ini? Semua data presensi, notula, dan undangan terkait akan ikut dihapus.')) {
       // Optimistic update: hapus dari state lokal segera
-      const previousData = [...jadwalRapatData];
+      const previousJadwal = [...jadwalRapatData];
+      const previousAbsensi = [...absensiData];
+      const previousNotulensi = [...notulensiData];
+
       setJadwalRapatData(prev => prev.filter(j => j.id !== id));
+      // Juga hapus absensi & notulensi terkait dari state lokal
+      setAbsensiData(prev => prev.filter(a => a.idKegiatan !== id));
+      setNotulensiData(prev => prev.filter(n => n.idKegiatan !== id));
       
       const success = await dataService.deleteJadwalRapat(id);
       if (success) {
-        setMessage({ type: 'success', text: 'Jadwal berhasil dihapus' });
+        setMessage({ type: 'success', text: 'Jadwal dan seluruh data terkait berhasil dihapus' });
         // Re-verify with server after a short delay to ensure DB consistency
         setTimeout(() => loadAdminData(), 500);
       } else {
         setMessage({ type: 'error', text: 'Gagal menghapus jadwal' });
-        // Rollback
-        setJadwalRapatData(previousData);
+        // Rollback all optimistic updates
+        setJadwalRapatData(previousJadwal);
+        setAbsensiData(previousAbsensi);
+        setNotulensiData(previousNotulensi);
       }
     }
   };
@@ -468,6 +606,7 @@ export default function AdminPanel() {
 
   const resetExportForm = () => {
     setExportForm({
+      jadwalId: '',
       judulKegiatan: '',
       hari: '',
       tanggal: '',
@@ -475,51 +614,95 @@ export default function AdminPanel() {
       waktu: '',
       exportType: 'pdf'
     });
+    setIsExporting(false);
   };
 
-  const handleExportSubmit = (e: React.FormEvent) => {
+  const fetchFilteredAbsensiForExport = async (): Promise<AbsensiRecord[]> => {
+    try {
+      const result = await dataService.getAbsensiListPaginated({
+        page: 1,
+        limit: 999999,
+        exclude_heavy: false, // We need signatures
+        idKegiatan: exportForm.jadwalId || undefined
+      });
+      return result.data;
+    } catch (error) {
+      console.error('Failed to fetch export data', error);
+      return [];
+    }
+  };
+
+  const handleExportSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isExporting) return;
     
     if (!exportForm.judulKegiatan || !exportForm.hari || !exportForm.tanggal || !exportForm.tempat) {
       setMessage({ type: 'error', text: 'Semua field harus diisi!' });
       return;
     }
 
-    const filtered = getFilteredAbsensi();
-    
-    if (filtered.length === 0) {
-      setMessage({ type: 'error', text: 'Tidak ada data absensi untuk di-export!' });
-      return;
-    }
+    setIsExporting(true);
+    setMessage({ type: 'info', text: 'Mengambil data absensi...' });
 
-    if (exportForm.exportType === 'pdf') {
-      setIsExportDialogOpen(false);
-      setIsSignatureDialogOpen(true);
-    } else {
-      exportAbsensiToExcel(filtered);
-      setIsExportDialogOpen(false);
-      setMessage({ type: 'success', text: 'Data berhasil di-export!' });
-      resetExportForm();
+    try {
+      const filtered = await fetchFilteredAbsensiForExport();
+      
+      if (filtered.length === 0) {
+        setMessage({ type: 'error', text: 'Tidak ada data presensi pada jadwal kegiatan ini!' });
+        setIsExporting(false);
+        return;
+      }
+
+      setExportData(filtered);
+
+      if (exportForm.exportType === 'pdf') {
+        setIsExportDialogOpen(false);
+        setIsSignatureDialogOpen(true);
+        setMessage({ type: 'info', text: 'Silakan tanda tangan untuk menyelesaikan export PDF' });
+        setIsExporting(false); // reset export state so they can submit signature
+      } else {
+        exportAbsensiToExcel(filtered);
+        setIsExportDialogOpen(false);
+        setMessage({ type: 'success', text: 'Data Excel berhasil di-export!' });
+        resetExportForm();
+      }
+    } catch (err) {
+      setMessage({ type: 'error', text: 'Gagal melakukan export data.' });
+      setIsExporting(false);
     }
   };
 
-  const handleSignatureSubmit = () => {
+  const handleSignatureSubmit = async () => {
+    if (isExporting) return;
+    
     if (!signaturePadRef.current || signaturePadRef.current.isEmpty()) {
       setMessage({ type: 'error', text: 'Mohon tanda tangan terlebih dahulu!' });
       return;
     }
 
-    const signatureData = signaturePadRef.current.toDataURL();
-    setAdminSignature(signatureData);
+    setIsExporting(true);
+    setMessage({ type: 'info', text: 'Sedang men-generate PDF absensi...' });
 
-    const filtered = getFilteredAbsensi();
-    exportAbsensiToPDFWithSignature(filtered, signatureData);
+    try {
+      const signatureData = signaturePadRef.current.toDataURL();
+      setAdminSignature(signatureData);
 
-    setIsSignatureDialogOpen(false);
-    setMessage({ type: 'success', text: 'PDF berhasil di-export dengan tanda tangan!' });
-    resetExportForm();
-    if (signaturePadRef.current) {
-      signaturePadRef.current.clear();
+      // Give small timeout to let the loader render before heavy PDF computation
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      exportAbsensiToPDFWithSignature(exportData, signatureData);
+
+      setIsSignatureDialogOpen(false);
+      setMessage({ type: 'success', text: 'PDF berhasil di-export dengan tanda tangan!' });
+      resetExportForm();
+      if (signaturePadRef.current) {
+        signaturePadRef.current.clear();
+      }
+    } catch (error) {
+      console.error(error);
+      setMessage({ type: 'error', text: 'Gagal men-generate PDF.' });
+    } finally {
+      setIsExporting(false);
     }
   };
 
@@ -596,7 +779,7 @@ export default function AdminPanel() {
       const cellPad = 3;
       const namaLines = doc.splitTextToSize(nama, colWidths[1] - 4);
       
-      const jabatan = item.isGuest ? '-' : ((user as any)?.jabatan || '-');
+      const jabatan = item.isGuest ? '-' : ((user as User & { jabatan?: string })?.jabatan || '-');
       const jabatanLines = doc.splitTextToSize(jabatan, colWidths[4] - 4);
       
       // Ambil tinggi baris maksimal antara nama dan jabatan
@@ -761,40 +944,12 @@ export default function AdminPanel() {
   };
 
   const getFilteredAbsensi = () => {
-    return absensiData.filter(item => {
-      const dateMatch = compareDates(item.tanggal, filterDate);
-      const userMatch = !filterUser || filterUser === 'all' || item.userId === filterUser;
-      const kegiatanMatch = filterKegiatan === 'all' || item.jenisKegiatan === filterKegiatan;
-      const namaKegiatanMatch = !filterNamaKegiatan || item.namaKegiatan.toLowerCase().includes(filterNamaKegiatan.toLowerCase());
-      
-      let kategoriMatch = true;
-      if (filterKategori !== 'all') {
-        if (item.isGuest) {
-          kategoriMatch = false;
-        } else {
-          const user = users.find(u => u.id === item.userId);
-          kategoriMatch = user?.kategori === filterKategori;
-        }
-      }
-
-      let timMatch = true;
-      if (filterTim !== 'all') {
-        if (item.isGuest) {
-          timMatch = false;
-        } else {
-          const user = users.find(u => u.id === item.userId);
-          timMatch = user?.tim === filterTim;
-        }
-      }
-      
-      return dateMatch && userMatch && kegiatanMatch && kategoriMatch && namaKegiatanMatch && timMatch;
-    });
+    return absensiData;
   };
 
-  // Unique nama kegiatan for auto-suggest
-  const uniqueNamaKegiatan = [...new Set(absensiData.map(a => a.namaKegiatan).filter(Boolean))];
+  const uniqueNamaKegiatan: string[] = [];
 
-  const filteredAbsensi = getFilteredAbsensi();
+  const filteredAbsensi = absensiData;
 
   const filteredActivities = activities.filter(item => {
     const dateMatch = compareDates(item.tanggal, filterDate);
@@ -838,11 +993,13 @@ export default function AdminPanel() {
 
   const stats = {
     totalUsers: users.length,
-    totalPresensi: absensiData.length,
-    totalNotula: notulensiData.length,
+    totalPresensi: absensiTotal,
+    totalNotula: notulensiTotal,
     totalActivities: activities.length,
-    filteredPresensi: filteredAbsensi.length
+    filteredPresensi: absensiTotal
   };
+
+  if (isInitialLoad) return <PageLoader text="Memuat Panel Admin..." className="min-h-[80vh]" />;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50">
@@ -1123,7 +1280,7 @@ export default function AdminPanel() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {users.map((user) => (
+                      {users.slice((userPage - 1) * USER_PAGE_SIZE, userPage * USER_PAGE_SIZE).map((user) => (
                         <TableRow key={user.id} className="hover:bg-gray-50">
                           <TableCell className="font-medium">{user.nama}</TableCell>
                           <TableCell className="text-gray-600">{user.email}</TableCell>
@@ -1225,6 +1382,35 @@ export default function AdminPanel() {
                       ))}
                     </TableBody>
                   </Table>
+                </div>
+                <div className="flex items-center justify-between p-4 border-t bg-gray-50 rounded-b-lg">
+                  <span className="text-sm text-gray-600">
+                    Menampilkan <strong className="text-blue-600">{users.length === 0 ? 0 : (userPage - 1) * USER_PAGE_SIZE + 1}</strong>–
+                    <strong className="text-blue-600">{Math.min(userPage * USER_PAGE_SIZE, users.length)}</strong> dari <strong className="text-blue-600">{users.length}</strong> user
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <Button 
+                      variant="outline" 
+                      size="sm" 
+                      disabled={userPage <= 1} 
+                      onClick={() => setUserPage(p => p - 1)}
+                      className="h-8"
+                    >
+                      Sebelumnya
+                    </Button>
+                    <span className="text-sm text-gray-700 px-2">
+                      Halaman <strong>{userPage}</strong> dari {Math.ceil(users.length / USER_PAGE_SIZE) || 1}
+                    </span>
+                    <Button 
+                      variant="outline" 
+                      size="sm" 
+                      disabled={userPage >= Math.ceil(users.length / USER_PAGE_SIZE)} 
+                      onClick={() => setUserPage(p => p + 1)}
+                      className="h-8"
+                    >
+                      Selanjutnya
+                    </Button>
+                  </div>
                 </div>
               </CardContent>
             </Card>
@@ -1359,6 +1545,7 @@ export default function AdminPanel() {
                                   
                                   setExportForm({
                                     ...exportForm,
+                                    jadwalId: jadwal.id,
                                     judulKegiatan: jadwal.judul,
                                     tanggal: jadwal.tanggal,
                                     hari: hari,
@@ -1451,15 +1638,14 @@ export default function AdminPanel() {
                             </Select>
                           </div>
                           <div className="bg-blue-50 p-4 rounded-lg border border-blue-200">
-                            <p className="text-sm text-blue-900 font-medium mb-2">
-                              Data yang akan di-export:
+                            <p className="text-sm text-blue-900 font-medium mb-1">
+                              Informasi Dokumen:
                             </p>
                             <ul className="text-sm text-blue-800 space-y-1">
-                              <li>• Total: <strong>{filteredAbsensi.length} orang</strong></li>
-                              <li>• Filter Kegiatan: <strong>{jenisKegiatanOptions.find(k => k.value === filterKegiatan)?.label || 'Semua'}</strong></li>
-                              <li>• Filter Kategori: <strong>{filterKategori === 'all' ? 'Semua' : filterKategori}</strong></li>
-                              {filterDate && <li>• Tanggal: <strong>{filterDate}</strong></li>}
-                              {filterNamaKegiatan && <li>• Nama Kegiatan: <strong>{filterNamaKegiatan}</strong></li>}
+                              <li>• Target Kegiatan: <strong>{exportForm.judulKegiatan || '(Pilih jadwal terlebih dahulu)'}</strong></li>
+                              <li>• Tanggal: <strong>{exportForm.tanggal ? `${exportForm.hari}, ${exportForm.tanggal}` : '-'}</strong></li>
+                              <li>• Tempat: <strong>{exportForm.tempat || '-'}</strong></li>
+                              <li>• Waktu: <strong>{exportForm.waktu || '-'}</strong></li>
                             </ul>
                           </div>
                           <div className="flex justify-end gap-2 pt-4">
@@ -1467,12 +1653,13 @@ export default function AdminPanel() {
                               type="button" 
                               variant="outline" 
                               onClick={() => setIsExportDialogOpen(false)}
+                              disabled={isExporting}
                             >
                               Batal
                             </Button>
-                            <Button type="submit" className="bg-green-600 hover:bg-green-700">
+                            <Button type="submit" className="bg-green-600 hover:bg-green-700" disabled={isExporting || !exportForm.jadwalId}>
                               <Download className="w-4 h-4 mr-2" />
-                              Export Sekarang
+                              {isExporting ? 'Sedang Memproses...' : 'Export Sekarang'}
                             </Button>
                           </div>
                         </form>
@@ -1514,12 +1701,13 @@ export default function AdminPanel() {
                         type="button" 
                         variant="outline" 
                         onClick={() => setIsSignatureDialogOpen(false)}
+                        disabled={isExporting}
                       >
                         Batal
                       </Button>
-                      <Button onClick={handleSignatureSubmit} className="bg-blue-600 hover:bg-blue-700">
+                      <Button onClick={handleSignatureSubmit} className="bg-blue-600 hover:bg-blue-700" disabled={isExporting}>
                         <Download className="w-4 h-4 mr-2" />
-                        Export PDF
+                        {isExporting ? 'Generating PDF...' : 'Export PDF'}
                       </Button>
                     </div>
                   </div>
@@ -1612,14 +1800,26 @@ export default function AdminPanel() {
                   </div>
                   <div className="space-y-2">
                     <Label className="text-gray-700">Nama Kegiatan</Label>
-                    <Select onValueChange={(v) => setFilterNamaKegiatan(v === 'all' ? '' : v)} value={filterNamaKegiatan || 'all'}>
+                    <Select 
+                      onValueChange={(value) => setFilterNamaKegiatan(value === 'all' ? '' : value)}
+                      value={filterNamaKegiatan || 'all'}
+                    >
                       <SelectTrigger className="border-gray-300">
-                        <SelectValue placeholder="Pilih kegiatan" />
+                        <SelectValue placeholder="Semua Kegiatan" />
                       </SelectTrigger>
                       <SelectContent>
                         <SelectItem value="all">Semua Kegiatan</SelectItem>
-                        {uniqueNamaKegiatan.map(nama => (
-                          <SelectItem key={nama} value={nama}>{nama}</SelectItem>
+                        {Array.from(
+                          new Map(
+                            jadwalRapatData
+                              .slice()
+                              .sort((a, b) => new Date(b.tanggal).getTime() - new Date(a.tanggal).getTime())
+                              .map(j => [j.judul, j])
+                          ).values()
+                        ).map(jadwal => (
+                          <SelectItem key={jadwal.id} value={jadwal.judul}>
+                            {jadwal.judul}
+                          </SelectItem>
                         ))}
                       </SelectContent>
                     </Select>
@@ -1661,7 +1861,7 @@ export default function AdminPanel() {
                         <TableHead className="font-semibold">Nama</TableHead>
                         <TableHead className="font-semibold">Kategori</TableHead>
                         <TableHead className="font-semibold">Jenis Kegiatan</TableHead>
-                        <TableHead className="font-semibold">Nama Kegiatan</TableHead> {/* ← KOLOM BARU */}
+                        <TableHead className="font-semibold">Nama Kegiatan</TableHead>
                         <TableHead className="font-semibold">Status</TableHead>
                         <TableHead className="font-semibold">TTD</TableHead>
                         <TableHead className="font-semibold text-center">Aksi</TableHead>
@@ -1675,7 +1875,7 @@ export default function AdminPanel() {
                           
                           return (
                             <TableRow key={item.id} className="hover:bg-gray-50">
-                              <TableCell className="font-medium">{index + 1}</TableCell>
+                              <TableCell className="font-medium">{(absensiPage - 1) * ABSENSI_PAGE_SIZE + index + 1}</TableCell>
                               <TableCell className="text-gray-600">{formatDateDisplay(item.tanggal)}</TableCell>
                               <TableCell className="text-gray-600">{item.waktu}</TableCell>
                               <TableCell>
@@ -1699,7 +1899,6 @@ export default function AdminPanel() {
                                   {item.jenisKegiatan.replace('-', ' ').toUpperCase()}
                                 </Badge>
                               </TableCell>
-                              {/* ← CELL BARU: Nama Kegiatan */}
                               <TableCell className="max-w-xs">
                                 <p className="text-sm text-gray-900 truncate" title={item.namaKegiatan}>
                                   {item.namaKegiatan || '-'}
@@ -1711,15 +1910,9 @@ export default function AdminPanel() {
                                 </Badge>
                               </TableCell>
                               <TableCell>
-                                {item.signature ? (
-                                  <img 
-                                    src={item.signature} 
-                                    alt="TTD" 
-                                    className="h-8 w-16 object-contain border rounded"
-                                  />
-                                ) : (
-                                  <span className="text-gray-400 text-xs">-</span>
-                                )}
+                                <Button variant="outline" size="sm" onClick={() => viewAbsensiSignature(item.id, item.namaUser)} title="Lihat Tanda Tangan" className="h-8 px-2">
+                                  <Eye className="w-4 h-4 text-blue-600" />
+                                </Button>
                               </TableCell>
                               <TableCell>
                                 <div className="flex justify-center">
@@ -1745,6 +1938,35 @@ export default function AdminPanel() {
                       )}
                     </TableBody>
                   </Table>
+                </div>
+                <div className="flex items-center justify-between p-4 border-t bg-gray-50 rounded-b-lg">
+                  <span className="text-sm text-gray-600">
+                    Menampilkan <strong className="text-green-600">{absensiTotal === 0 ? 0 : (absensiPage - 1) * ABSENSI_PAGE_SIZE + 1}</strong>–
+                    <strong className="text-green-600">{Math.min(absensiPage * ABSENSI_PAGE_SIZE, absensiTotal)}</strong> dari <strong className="text-green-600">{absensiTotal}</strong> data absensi
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <Button 
+                      variant="outline" 
+                      size="sm" 
+                      disabled={absensiPage <= 1} 
+                      onClick={() => setAbsensiPage(p => p - 1)}
+                      className="h-8"
+                    >
+                      Sebelumnya
+                    </Button>
+                    <span className="text-sm text-gray-700 px-2">
+                      Halaman <strong>{absensiPage}</strong> dari {absensiTotalPages || 1}
+                    </span>
+                    <Button 
+                      variant="outline" 
+                      size="sm" 
+                      disabled={absensiPage >= absensiTotalPages} 
+                      onClick={() => setAbsensiPage(p => p + 1)}
+                      className="h-8"
+                    >
+                      Selanjutnya
+                    </Button>
+                  </div>
                 </div>
               </CardContent>
             </Card>
@@ -1776,14 +1998,15 @@ export default function AdminPanel() {
                         <TableHead className="font-semibold">Repeat</TableHead>
                         <TableHead className="font-semibold">Tautan / QR</TableHead>
                         <TableHead className="font-semibold text-center">Aksi</TableHead>
-
                       </TableRow>
                     </TableHeader>
                     <TableBody>
                       {jadwalRapatData.length > 0 ? (
-                        jadwalRapatData.map((j, idx) => (
+                        jadwalRapatData
+                          .slice((jadwalPage - 1) * JADWAL_PAGE_SIZE, jadwalPage * JADWAL_PAGE_SIZE)
+                          .map((j, idx) => (
                           <TableRow key={j.id} className="hover:bg-gray-50">
-                            <TableCell className="font-medium">{idx + 1}</TableCell>
+                            <TableCell className="font-medium">{(jadwalPage - 1) * JADWAL_PAGE_SIZE + idx + 1}</TableCell>
                             <TableCell>
                               <div>
                                 <p className="font-semibold text-gray-900">{j.judul}</p>
@@ -1859,8 +2082,6 @@ export default function AdminPanel() {
                                 );
                               })()}
                             </TableCell>
-
-
                             <TableCell>
                               <div className="flex justify-center">
                                 <Button
@@ -1885,6 +2106,37 @@ export default function AdminPanel() {
                     </TableBody>
                   </Table>
                 </div>
+                {jadwalRapatData.length > 0 && (
+                  <div className="flex items-center justify-between p-4 border-t bg-gray-50 rounded-b-lg">
+                    <span className="text-sm text-gray-600">
+                      Menampilkan <strong className="text-teal-600">{(jadwalPage - 1) * JADWAL_PAGE_SIZE + 1}</strong>–
+                      <strong className="text-teal-600">{Math.min(jadwalPage * JADWAL_PAGE_SIZE, jadwalRapatData.length)}</strong> dari <strong className="text-teal-600">{jadwalRapatData.length}</strong> jadwal
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <Button 
+                        variant="outline" 
+                        size="sm" 
+                        disabled={jadwalPage <= 1} 
+                        onClick={() => setJadwalPage(p => p - 1)}
+                        className="h-8"
+                      >
+                        Sebelumnya
+                      </Button>
+                      <span className="text-sm text-gray-700 px-2">
+                        Halaman <strong>{jadwalPage}</strong> dari {Math.ceil(jadwalRapatData.length / JADWAL_PAGE_SIZE) || 1}
+                      </span>
+                      <Button 
+                        variant="outline" 
+                        size="sm" 
+                        disabled={jadwalPage >= Math.ceil(jadwalRapatData.length / JADWAL_PAGE_SIZE)} 
+                        onClick={() => setJadwalPage(p => p + 1)}
+                        className="h-8"
+                      >
+                        Selanjutnya
+                      </Button>
+                    </div>
+                  </div>
+                )}
               </CardContent>
             </Card>
           </TabsContent>
@@ -1975,6 +2227,35 @@ export default function AdminPanel() {
                     </TableBody>
                   </Table>
                 </div>
+                <div className="flex items-center justify-between p-4 border-t bg-gray-50 rounded-b-lg">
+                  <span className="text-sm text-gray-600">
+                    Menampilkan <strong className="text-purple-600">{notulensiTotal === 0 ? 0 : (notulensiPage - 1) * NOTULENSI_PAGE_SIZE + 1}</strong>–
+                    <strong className="text-purple-600">{Math.min(notulensiPage * NOTULENSI_PAGE_SIZE, notulensiTotal)}</strong> dari <strong className="text-purple-600">{notulensiTotal}</strong> data notulensi
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <Button 
+                      variant="outline" 
+                      size="sm" 
+                      disabled={notulensiPage <= 1} 
+                      onClick={() => setNotulensiPage(p => p - 1)}
+                      className="h-8"
+                    >
+                      Sebelumnya
+                    </Button>
+                    <span className="text-sm text-gray-700 px-2">
+                      Halaman <strong>{notulensiPage}</strong> dari {notulensiTotalPages || 1}
+                    </span>
+                    <Button 
+                      variant="outline" 
+                      size="sm" 
+                      disabled={notulensiPage >= notulensiTotalPages} 
+                      onClick={() => setNotulensiPage(p => p + 1)}
+                      className="h-8"
+                    >
+                      Selanjutnya
+                    </Button>
+                  </div>
+                </div>
               </CardContent>
             </Card>
           </TabsContent>
@@ -1996,146 +2277,155 @@ export default function AdminPanel() {
                 </div>
               </CardHeader>
               <CardContent className="pt-6">
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                  {/* User Statistics */}
-                  <Card className="border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-indigo-50">
-                    <CardHeader>
-                      <div className="flex items-center justify-between">
-                        <CardTitle className="text-lg text-blue-900">Statistik User</CardTitle>
-                        <Users className="w-6 h-6 text-blue-600" />
-                      </div>
-                    </CardHeader>
-                    <CardContent className="space-y-3">
-                      <div className="flex justify-between items-center p-3 bg-white rounded-lg">
-                        <span className="text-sm text-gray-700">Total User</span>
-                        <span className="text-xl font-bold text-blue-600">{stats.totalUsers}</span>
-                      </div>
-                      <div className="flex justify-between items-center p-3 bg-white rounded-lg">
-                        <span className="text-sm text-gray-700">User Aktif</span>
-                        <span className="text-xl font-bold text-green-600">
-                          {users.filter(u => !u.isBlocked).length}
-                        </span>
-                      </div>
-                      <div className="flex justify-between items-center p-3 bg-white rounded-lg">
-                        <span className="text-sm text-gray-700">User Diblokir</span>
-                        <span className="text-xl font-bold text-red-600">
-                          {users.filter(u => u.isBlocked).length}
-                        </span>
-                      </div>
-                      <div className="flex justify-between items-center p-3 bg-white rounded-lg">
-                        <span className="text-sm text-gray-700">Admin</span>
-                        <span className="text-xl font-bold text-purple-600">
-                          {users.filter(u => u.role === 'admin').length}
-                        </span>
-                      </div>
-                    </CardContent>
-                  </Card>
-
-                  {/* Absensi Statistics */}
-                  <Card className="border-2 border-green-200 bg-gradient-to-br from-green-50 to-emerald-50">
-                    <CardHeader>
-                      <div className="flex items-center justify-between">
-                        <CardTitle className="text-lg text-green-900">Statistik Absensi</CardTitle>
-                        <Calendar className="w-6 h-6 text-green-600" />
-                      </div>
-                    </CardHeader>
-                    <CardContent className="space-y-3">
-                      <div className="flex justify-between items-center p-3 bg-white rounded-lg">
-                        <span className="text-sm text-gray-700">Total Record</span>
-                        <span className="text-xl font-bold text-green-600">{stats.totalPresensi}</span>
-                      </div>
-                      <div className="flex justify-between items-center p-3 bg-white rounded-lg">
-                        <span className="text-sm text-gray-700">Pegawai</span>
-                        <span className="text-xl font-bold text-blue-600">
-                          {absensiData.filter(a => {
-                            const user = users.find(u => u.id === a.userId);
-                            return user?.kategori === 'Pegawai';
-                          }).length}
-                        </span>
-                      </div>
-                      <div className="flex justify-between items-center p-3 bg-white rounded-lg">
-                        <span className="text-sm text-gray-700">Magang</span>
-                        <span className="text-xl font-bold text-purple-600">
-                          {absensiData.filter(a => {
-                            const user = users.find(u => u.id === a.userId);
-                            return user?.kategori === 'Magang';
-                          }).length}
-                        </span>
-                      </div>
-                      <div className="flex justify-between items-center p-3 bg-white rounded-lg">
-                        <span className="text-sm text-gray-700">Tamu</span>
-                        <span className="text-xl font-bold text-orange-600">
-                          {absensiData.filter(a => a.isGuest).length}
-                        </span>
-                      </div>
-                    </CardContent>
-                  </Card>
-
-                  {/* Notulensi Statistics */}
-                  <Card className="border-2 border-purple-200 bg-gradient-to-br from-purple-50 to-pink-50">
-                    <CardHeader>
-                      <div className="flex items-center justify-between">
-                        <CardTitle className="text-lg text-purple-900">Statistik Notulensi</CardTitle>
-                        <FileText className="w-6 h-6 text-purple-600" />
-                      </div>
-                    </CardHeader>
-                    <CardContent className="space-y-3">
-                      <div className="flex justify-between items-center p-3 bg-white rounded-lg">
-                        <span className="text-sm text-gray-700">Total Dokumen</span>
-                        <span className="text-xl font-bold text-purple-600">{stats.totalNotula}</span>
-                      </div>
-                      <div className="flex justify-between items-center p-3 bg-white rounded-lg">
-                        <span className="text-sm text-gray-700">Rapat</span>
-                        <span className="text-xl font-bold text-blue-600">
-                          {notulensiData.filter(n => n.jenisKegiatan === 'rapat').length}
-                        </span>
-                      </div>
-                      <div className="flex justify-between items-center p-3 bg-white rounded-lg">
-                        <span className="text-sm text-gray-700">Doa Bersama</span>
-                        <span className="text-xl font-bold text-green-600">
-                          {notulensiData.filter(n => n.jenisKegiatan === 'doa').length}
-                        </span>
-                      </div>
-                      <div className="flex justify-between items-center p-3 bg-white rounded-lg">
-                        <span className="text-sm text-gray-700">Rapelan</span>
-                        <span className="text-xl font-bold text-orange-600">
-                          {notulensiData.filter(n => n.jenisKegiatan === 'rapelan').length}
-                        </span>
-                      </div>
-                    </CardContent>
-                  </Card>
-                </div>
-
-                {/* Activity Breakdown */}
-                <Card className="mt-6 border-2 border-indigo-200 bg-gradient-to-br from-indigo-50 to-blue-50">
-                  <CardHeader>
-                    <CardTitle className="text-lg text-indigo-900">Breakdown Kegiatan Absensi</CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-                      {['senam', 'apel', 'rapat', 'doa-bersama', 'rapelan'].map(activity => {
-                        const count = absensiData.filter(a => a.jenisKegiatan === activity).length;
-                        const colors = {
-                          'senam': { bg: 'bg-blue-100', text: 'text-blue-700', border: 'border-blue-300' },
-                          'apel': { bg: 'bg-green-100', text: 'text-green-700', border: 'border-green-300' },
-                          'rapat': { bg: 'bg-orange-100', text: 'text-orange-700', border: 'border-orange-300' },
-                          'doa-bersama': { bg: 'bg-purple-100', text: 'text-purple-700', border: 'border-purple-300' },
-                          'rapelan': { bg: 'bg-red-100', text: 'text-red-700', border: 'border-red-300' }
-                        };
-                        const color = colors[activity as keyof typeof colors];
-                        
-                        return (
-                          <div key={activity} className={`p-4 ${color.bg} border-2 ${color.border} rounded-lg text-center`}>
-                            <div className={`text-2xl font-bold ${color.text}`}>{count}</div>
-                            <div className="text-xs text-gray-700 mt-1 capitalize">
-                              {activity.replace('-', ' ')}
-                            </div>
+                {isStatsLoading || allAbsensiStats.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-12 text-gray-500">
+                    <Loader2 className="w-8 h-8 animate-spin text-orange-600 mb-2" />
+                    <p>Memproses statistik sistem...</p>
+                  </div>
+                ) : (
+                  <>
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                      {/* User Statistics */}
+                      <Card className="border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-indigo-50">
+                        <CardHeader>
+                          <div className="flex items-center justify-between">
+                            <CardTitle className="text-lg text-blue-900">Statistik User</CardTitle>
+                            <Users className="w-6 h-6 text-blue-600" />
                           </div>
-                        );
-                      })}
+                        </CardHeader>
+                        <CardContent className="space-y-3">
+                          <div className="flex justify-between items-center p-3 bg-white rounded-lg">
+                            <span className="text-sm text-gray-700">Total User</span>
+                            <span className="text-xl font-bold text-blue-600">{stats.totalUsers}</span>
+                          </div>
+                          <div className="flex justify-between items-center p-3 bg-white rounded-lg">
+                            <span className="text-sm text-gray-700">User Aktif</span>
+                            <span className="text-xl font-bold text-green-600">
+                              {users.filter(u => !u.isBlocked).length}
+                            </span>
+                          </div>
+                          <div className="flex justify-between items-center p-3 bg-white rounded-lg">
+                            <span className="text-sm text-gray-700">User Diblokir</span>
+                            <span className="text-xl font-bold text-red-600">
+                              {users.filter(u => u.isBlocked).length}
+                            </span>
+                          </div>
+                          <div className="flex justify-between items-center p-3 bg-white rounded-lg">
+                            <span className="text-sm text-gray-700">Admin</span>
+                            <span className="text-xl font-bold text-purple-600">
+                              {users.filter(u => u.role === 'admin').length}
+                            </span>
+                          </div>
+                        </CardContent>
+                      </Card>
+
+                      {/* Absensi Statistics */}
+                      <Card className="border-2 border-green-200 bg-gradient-to-br from-green-50 to-emerald-50">
+                        <CardHeader>
+                          <div className="flex items-center justify-between">
+                            <CardTitle className="text-lg text-green-900">Statistik Absensi</CardTitle>
+                            <Calendar className="w-6 h-6 text-green-600" />
+                          </div>
+                        </CardHeader>
+                        <CardContent className="space-y-3">
+                          <div className="flex justify-between items-center p-3 bg-white rounded-lg">
+                            <span className="text-sm text-gray-700">Total Record</span>
+                            <span className="text-xl font-bold text-green-600">{stats.totalPresensi}</span>
+                          </div>
+                          <div className="flex justify-between items-center p-3 bg-white rounded-lg">
+                            <span className="text-sm text-gray-700">Pegawai</span>
+                            <span className="text-xl font-bold text-blue-600">
+                              {allAbsensiStats.filter(a => {
+                                const user = users.find(u => u.id === a.userId);
+                                return user?.kategori === 'Pegawai';
+                              }).length}
+                            </span>
+                          </div>
+                          <div className="flex justify-between items-center p-3 bg-white rounded-lg">
+                            <span className="text-sm text-gray-700">Magang</span>
+                            <span className="text-xl font-bold text-purple-600">
+                              {allAbsensiStats.filter(a => {
+                                const user = users.find(u => u.id === a.userId);
+                                return user?.kategori === 'Magang';
+                              }).length}
+                            </span>
+                          </div>
+                          <div className="flex justify-between items-center p-3 bg-white rounded-lg">
+                            <span className="text-sm text-gray-700">Tamu</span>
+                            <span className="text-xl font-bold text-orange-600">
+                              {allAbsensiStats.filter(a => a.isGuest).length}
+                            </span>
+                          </div>
+                        </CardContent>
+                      </Card>
+
+                      {/* Notulensi Statistics */}
+                      <Card className="border-2 border-purple-200 bg-gradient-to-br from-purple-50 to-pink-50">
+                        <CardHeader>
+                          <div className="flex items-center justify-between">
+                            <CardTitle className="text-lg text-purple-900">Statistik Notulensi</CardTitle>
+                            <FileText className="w-6 h-6 text-purple-600" />
+                          </div>
+                        </CardHeader>
+                        <CardContent className="space-y-3">
+                          <div className="flex justify-between items-center p-3 bg-white rounded-lg">
+                            <span className="text-sm text-gray-700">Total Dokumen</span>
+                            <span className="text-xl font-bold text-purple-600">{stats.totalNotula}</span>
+                          </div>
+                          <div className="flex justify-between items-center p-3 bg-white rounded-lg">
+                            <span className="text-sm text-gray-700">Rapat</span>
+                            <span className="text-xl font-bold text-blue-600">
+                              {allNotulensiStats.filter(n => n.jenisKegiatan === 'rapat').length}
+                            </span>
+                          </div>
+                          <div className="flex justify-between items-center p-3 bg-white rounded-lg">
+                            <span className="text-sm text-gray-700">Doa Bersama</span>
+                            <span className="text-xl font-bold text-green-600">
+                              {allNotulensiStats.filter(n => n.jenisKegiatan === 'doa').length}
+                            </span>
+                          </div>
+                          <div className="flex justify-between items-center p-3 bg-white rounded-lg">
+                            <span className="text-sm text-gray-700">Rapelan</span>
+                            <span className="text-xl font-bold text-orange-600">
+                              {allNotulensiStats.filter(n => n.jenisKegiatan === 'rapelan').length}
+                            </span>
+                          </div>
+                        </CardContent>
+                      </Card>
                     </div>
-                  </CardContent>
-                </Card>
+
+                    {/* Activity Breakdown */}
+                    <Card className="mt-6 border-2 border-indigo-200 bg-gradient-to-br from-indigo-50 to-blue-50">
+                      <CardHeader>
+                        <CardTitle className="text-lg text-indigo-900">Breakdown Kegiatan Absensi</CardTitle>
+                      </CardHeader>
+                      <CardContent>
+                        <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+                          {['senam', 'apel', 'rapat', 'doa-bersama', 'rapelan'].map(activity => {
+                            const count = allAbsensiStats.filter(a => a.jenisKegiatan === activity).length;
+                            const colors = {
+                              'senam': { bg: 'bg-blue-100', text: 'text-blue-700', border: 'border-blue-300' },
+                              'apel': { bg: 'bg-green-100', text: 'text-green-700', border: 'border-green-300' },
+                              'rapat': { bg: 'bg-orange-100', text: 'text-orange-700', border: 'border-orange-300' },
+                              'doa-bersama': { bg: 'bg-purple-100', text: 'text-purple-700', border: 'border-purple-300' },
+                              'rapelan': { bg: 'bg-red-100', text: 'text-red-700', border: 'border-red-300' }
+                            };
+                            const color = colors[activity as keyof typeof colors];
+                            
+                            return (
+                              <div key={activity} className={`p-4 ${color.bg} border-2 ${color.border} rounded-lg text-center`}>
+                                <div className={`text-2xl font-bold ${color.text}`}>{count}</div>
+                                <div className="text-xs text-gray-700 mt-1 capitalize">
+                                  {activity.replace('-', ' ')}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </CardContent>
+                    </Card>
+                  </>
+                )}
 
                 {/* System Info */}
                 <Card className="mt-6 border-2 border-gray-200 bg-gradient-to-br from-gray-50 to-slate-50">
@@ -2245,6 +2535,34 @@ export default function AdminPanel() {
               </Button>
             </div>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* View Signature Dialog */}
+      <Dialog open={viewingSignature.open} onOpenChange={(open) => setViewingSignature(prev => ({ ...prev, open }))}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-xl text-blue-900">Tanda Tangan</DialogTitle>
+            <DialogDescription>
+              Tanda tangan dari {viewingSignature.nama}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col items-center justify-center p-6 border-2 border-gray-200 rounded-lg bg-white">
+            {viewingSignature.signature ? (
+              <img 
+                src={viewingSignature.signature} 
+                alt={`Tanda tangan ${viewingSignature.nama}`} 
+                className="max-h-48 object-contain"
+              />
+            ) : (
+              <p className="text-gray-500">Tidak ada tanda tangan</p>
+            )}
+          </div>
+          <div className="flex justify-end pt-4">
+            <Button onClick={() => setViewingSignature(prev => ({ ...prev, open: false }))}>
+              Tutup
+            </Button>
+          </div>
         </DialogContent>
       </Dialog>
     </div>

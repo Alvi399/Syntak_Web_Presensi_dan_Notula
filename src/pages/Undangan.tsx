@@ -27,11 +27,16 @@ export default function Undangan() {
   const [uploadPreview, setUploadPreview] = useState<string>('');
   const [selectedJadwalId, setSelectedJadwalId] = useState<string>('');
   const [isBroadcasting, setIsBroadcasting] = useState<string | null>(null); // id of undangan being broadcast
+  const [searchQuery, setSearchQuery] = useState('');
+  const [dateFilter, setDateFilter] = useState(new Date().toISOString().split('T')[0]);
   
   const currentUser = authService.getCurrentUser();
 
   useEffect(() => {
     loadUndangan();
+  }, [dateFilter]);
+
+  useEffect(() => {
     loadActiveJadwal();
   }, []);
 
@@ -55,7 +60,8 @@ export default function Undangan() {
   };
 
   const loadUndangan = async () => {
-    const data = await dataService.getUndanganList();
+    const effectiveDate = dateFilter || new Date().toISOString().split('T')[0];
+    const data = await dataService.getUndanganList(effectiveDate);
     setUndanganList(data);
   };
 
@@ -294,6 +300,12 @@ export default function Undangan() {
   }).length;
 
   const uploadedFilesCount = undanganList.filter(u => u.isUploadedFile).length;
+
+  const filteredList = undanganList.filter(u => 
+    (u.perihal || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+    (u.nomorSurat || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+    (u.kepada || '').toLowerCase().includes(searchQuery.toLowerCase())
+  );
 
   return (
     <div className="space-y-6">
@@ -793,6 +805,14 @@ export default function Undangan() {
         </DialogContent>
       </Dialog>
 
+      <div className="flex gap-4 mb-6 mt-6">
+        <div className="flex-1 relative">
+          <Input placeholder="Cari undangan (perihal, nomor surat)..." value={searchQuery} onChange={e => setSearchQuery(e.target.value)} className="pl-10" />
+          <FileText className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+        </div>
+        <Input type="date" value={dateFilter} onChange={e => setDateFilter(e.target.value)} className="w-48" />
+      </div>
+
       {/* Undangan List */}
       <Card className="border-0 shadow-lg">
         <CardHeader className="bg-gradient-to-r from-orange-50 to-amber-50 border-b">
@@ -809,14 +829,14 @@ export default function Undangan() {
               </CardDescription>
             </div>
             <Badge variant="outline" className="text-lg px-4 py-2">
-              {undanganList.length} dokumen
+              {filteredList.length} dokumen
             </Badge>
           </div>
         </CardHeader>
         <CardContent className="pt-6">
-          {undanganList.length > 0 ? (
+          {filteredList.length > 0 ? (
             <div className="space-y-4">
-              {undanganList.map((undangan) => (
+              {filteredList.map((undangan) => (
                 <div 
                   key={undangan.id} 
                   className={`group relative overflow-hidden p-5 border-2 rounded-xl hover:shadow-md transition-all duration-300 ${

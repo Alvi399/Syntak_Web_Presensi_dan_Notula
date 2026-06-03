@@ -253,13 +253,51 @@ class DataService {
     }
   }
 
-  async getAbsensiList(userId?: string): Promise<AbsensiRecord[]> {
+  async getAbsensiList(userId?: string, tanggal?: string): Promise<AbsensiRecord[]> {
     try {
-      const url = userId ? `/absensi?userId=${userId}` : '/absensi';
+      const queryParams = new URLSearchParams();
+      if (userId) queryParams.append('userId', userId);
+      if (tanggal) queryParams.append('tanggal', tanggal);
+      const url = queryParams.toString() ? `/absensi?${queryParams.toString()}` : '/absensi';
       return await apiClient.get<AbsensiRecord[]>(url);
     } catch (error) {
       console.error('Get absensi list error:', error);
       return [];
+    }
+  }
+
+  async getAbsensiListPaginated(params: {
+    page: number;
+    limit: number;
+    exclude_heavy?: boolean;
+    tanggal?: string;
+    jenisKegiatan?: string;
+    kategori?: string;
+    tim?: string;
+    search?: string;
+    userId?: string;
+    idKegiatan?: string;
+  }): Promise<{ data: AbsensiRecord[]; pagination: { total: number; page: number; limit: number; totalPages: number } }> {
+    try {
+      const queryParams = new URLSearchParams();
+      Object.entries(params).forEach(([key, val]) => {
+        if (val !== undefined && val !== null) {
+          queryParams.append(key, String(val));
+        }
+      });
+      return await apiClient.get<any>(`/absensi?${queryParams.toString()}`);
+    } catch (error) {
+      console.error('Get paginated absensi error:', error);
+      return { data: [], pagination: { total: 0, page: params.page, limit: params.limit, totalPages: 0 } };
+    }
+  }
+
+  async getAbsensiById(id: string): Promise<AbsensiRecord | null> {
+    try {
+      return await apiClient.get<AbsensiRecord>(`/absensi/${id}`);
+    } catch (error) {
+      console.error('Get single absensi error:', error);
+      return null;
     }
   }
 
@@ -480,12 +518,44 @@ class DataService {
     }
   }
 
-  async getNotulensiList(): Promise<NotulensiRecord[]> {
+  async getNotulensiList(tanggal?: string): Promise<NotulensiRecord[]> {
     try {
-      return await apiClient.get<NotulensiRecord[]>('/notulensi');
+      const url = tanggal ? `/notulensi?tanggal=${tanggal}` : '/notulensi';
+      return await apiClient.get<NotulensiRecord[]>(url);
     } catch (error) {
       console.error('Get notulensi list error:', error);
       return [];
+    }
+  }
+
+  async getNotulensiListPaginated(params: {
+    page: number;
+    limit: number;
+    exclude_heavy?: boolean;
+    tanggal?: string;
+    jenisKegiatan?: string;
+    search?: string;
+  }): Promise<{ data: NotulensiRecord[]; pagination: { total: number; page: number; limit: number; totalPages: number } }> {
+    try {
+      const queryParams = new URLSearchParams();
+      Object.entries(params).forEach(([key, val]) => {
+        if (val !== undefined && val !== null) {
+          queryParams.append(key, String(val));
+        }
+      });
+      return await apiClient.get<any>(`/notulensi?${queryParams.toString()}`);
+    } catch (error) {
+      console.error('Get paginated notulensi error:', error);
+      return { data: [], pagination: { total: 0, page: params.page, limit: params.limit, totalPages: 0 } };
+    }
+  }
+
+  async getNotulensiById(id: string): Promise<NotulensiRecord | null> {
+    try {
+      return await apiClient.get<NotulensiRecord>(`/notulensi/${id}`);
+    } catch (error) {
+      console.error('Get single notulensi error:', error);
+      return null;
     }
   }
 
@@ -545,12 +615,42 @@ class DataService {
     }
   }
 
-  async getUndanganList(): Promise<UndanganRecord[]> {
+  async getUndanganList(tanggal?: string): Promise<UndanganRecord[]> {
     try {
-      return await apiClient.get<UndanganRecord[]>('/undangan');
+      const url = tanggal ? `/undangan?tanggal=${tanggal}` : '/undangan';
+      return await apiClient.get<UndanganRecord[]>(url);
     } catch (error) {
       console.error('Get undangan list error:', error);
       return [];
+    }
+  }
+
+  async getUndanganListPaginated(params: {
+    page: number;
+    limit: number;
+    exclude_heavy?: boolean;
+    search?: string;
+  }): Promise<{ data: UndanganRecord[]; pagination: { total: number; page: number; limit: number; totalPages: number } }> {
+    try {
+      const queryParams = new URLSearchParams();
+      Object.entries(params).forEach(([key, val]) => {
+        if (val !== undefined && val !== null) {
+          queryParams.append(key, String(val));
+        }
+      });
+      return await apiClient.get<any>(`/undangan?${queryParams.toString()}`);
+    } catch (error) {
+      console.error('Get paginated undangan error:', error);
+      return { data: [], pagination: { total: 0, page: params.page, limit: params.limit, totalPages: 0 } };
+    }
+  }
+
+  async getUndanganById(id: string): Promise<UndanganRecord | null> {
+    try {
+      return await apiClient.get<UndanganRecord>(`/undangan/${id}`);
+    } catch (error) {
+      console.error('Get single undangan error:', error);
+      return null;
     }
   }
 
